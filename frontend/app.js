@@ -263,6 +263,18 @@
       this.speechRecognition = null;
       this.viewMode = 'desktop';
       this.deviceWidth = 390;
+      this.currentLang = localStorage.getItem('sakhi_lang') || 'en';
+
+      // Household Prioritization Intelligence state
+      this.priorities = [];
+      this.prioritySummary = null;
+      this.currentPriorityFilter = 'all';
+      this.currentPrioritySort = 'priority';
+      this.prioritySearchQuery = '';
+      this.selectedHouseholdId = null;
+      this.selectedHouseholdDetail = null;
+      this.chatHistory = [];
+      this.voiceChatHistory = [];
 
       this.init();
     }
@@ -326,13 +338,16 @@
           if (vData.data && vData.data.length > 0) {
             this.visits = vData.data;
             this.saveState('sakhi_visits', this.visits);
-            this.renderVisitsList();
+            this.renderVisitsList(this.currentVisitFilter || 'all', this.visitSearchQuery || '');
             this.renderFollowupsList();
             this.renderAlertsList();
           }
         }
 
-        // 4. Fetch aggregated dashboard metrics
+        // 4. Fetch Household Prioritization Intelligence
+        await this.fetchPriorities();
+
+        // 5. Fetch aggregated dashboard metrics
         const dResp = await fetch('/api/dashboard');
         if (dResp.ok) {
           const dData = await dResp.json();
@@ -375,6 +390,9 @@
       // Setup initial view mode (Desktop vs Mobile)
       const savedMode = localStorage.getItem('sakhi_view_mode') || (window.innerWidth >= 1024 ? 'desktop' : 'mobile');
       this.setViewMode(savedMode);
+
+      // Apply saved interface language (EN / HI / KN)
+      try { this.applyLanguage(this.currentLang); } catch (e) { console.warn('Language init skipped:', e); }
 
       // Initial route based on auth
       if (!this.isLoggedIn) {
@@ -442,6 +460,10 @@
 
       if (screenId === 'nearby-facilities') {
         this.initNearbyFacilitiesScreen();
+      } else if (this.isLoggedIn && ['home', 'visits', 'followups', 'alerts', 'maternal-list', 'vaccine-list'].includes(screenId)) {
+        this.fetchBackendData();
+      } else if (this.isLoggedIn && screenId === 'household-detail' && this.selectedHouseholdId) {
+        this.loadHouseholdDetail(this.selectedHouseholdId);
       }
 
       // Hide or show bottom navigation bar
@@ -471,6 +493,7 @@
         'vaccine-list': 'Vaccine Tracker / Babies List',
         'vaccine-detail': this.selectedBaby ? `Vaccines / ${this.selectedBaby.name}` : 'Child Details',
         'vaccine-form': 'Vaccines / Add-Edit Baby',
+        'household-detail': this.selectedHouseholdId ? `Household / ${this.selectedHouseholdId}` : 'Household Detail',
         'profile': 'ASHA Worker Profile',
         'login': 'Login Portal'
       };
@@ -762,6 +785,7 @@
         });
         if (resp.ok) {
           this.showToast('Saved mother record in SQLite database!');
+          await this.fetchBackendData();
         }
       } catch (err) {
         console.warn('API save mother error:', err);
@@ -959,6 +983,7 @@
         });
         if (resp.ok) {
           this.showToast('Saved baby record in SQLite database!');
+          await this.fetchBackendData();
         }
       } catch (err) {
         console.warn('API save baby error:', err);
@@ -1013,10 +1038,38 @@
       // Update Upcoming & Overdue Counts matching Dashboard banner
       const upcomingVisits = this.visits.filter(v => v.status === 'Upcoming').length;
       const overdueVisits = this.visits.filter(v => v.status === 'Overdue').length;
+      const dueVisits = this.visits.filter(v => v.status === 'Due').length;
+      const completeVisits = this.visits.filter(v => v.status === 'Complete').length;
+
       const upcEl = document.getElementById('statUpcomingVisits');
       const ovdEl = document.getElementById('statOverdueVisits');
       if (upcEl) upcEl.textContent = upcomingVisits;
       if (ovdEl) ovdEl.textContent = overdueVisits;
+
+      // Sync filter pill counts with live DB records
+      const setPill = (screenSel, filterVal, label) => {
+        const el = document.querySelector(`${screenSel} .filter-pill-btn[data-filter="${filterVal}"]`);
+        if (el) el.textContent = label;
+      };
+      setPill('#screen-visits', 'all', `All (${this.visits.length})`);
+      setPill('#screen-visits', 'Overdue', `Overdue (${overdueVisits})`);
+      setPill('#screen-visits', 'Due', `Due (${dueVisits})`);
+      setPill('#screen-visits', 'Upcoming', `Upcoming (${upcomingVisits})`);
+      setPill('#screen-visits', 'Complete', `Complete (${completeVisits})`);
+
+      const followups = this.visits.filter(v => v.followup && v.followup.required);
+      const reqFollowups = followups.filter(v => v.status !== 'Complete').length;
+      const compFollowups = followups.filter(v => v.status === 'Complete').length;
+      setPill('#screen-followups', 'all', `All Follow-ups (${followups.length})`);
+      setPill('#screen-followups', 'required', `Action Required (${reqFollowups})`);
+      setPill('#screen-followups', 'completed', `Completed (${compFollowups})`);
+
+      const alerts = this.visits.filter(v => v.alert);
+      const urgentAlerts = alerts.filter(v => (typeof v.alert === 'string' || (v.alert.priority || '').toLowerCase() === 'urgent')).length;
+      const modAlerts = alerts.length - urgentAlerts;
+      setPill('#screen-alerts', 'all', `All Alerts (${alerts.length})`);
+      setPill('#screen-alerts', 'Urgent', `Urgent Priority (${urgentAlerts})`);
+      setPill('#screen-alerts', 'Moderate', `Moderate (${modAlerts})`);
     }
 
     // ============================================================
@@ -1034,10 +1087,13 @@
       if (searchQuery) {
         const q = searchQuery.toLowerCase().trim();
         list = list.filter(v => 
-          v.personName.toLowerCase().includes(q) ||
-          v.village.toLowerCase().includes(q) ||
-          v.purpose.toLowerCase().includes(q) ||
-          v.event.toLowerCase().includes(q)
+          (v.personName || '').toLowerCase().includes(q) ||
+          (v.beneficiary_id || '').toLowerCase().includes(q) ||
+          (v.householdId || '').toLowerCase().includes(q) ||
+          (v.village || '').toLowerCase().includes(q) ||
+          (v.purpose || '').toLowerCase().includes(q) ||
+          (v.event || '').toLowerCase().includes(q) ||
+          (v.previousRecord || '').toLowerCase().includes(q)
         );
       }
 
@@ -1053,12 +1109,16 @@
         else if (v.status === 'Complete') badgeClass = 'tag-emerald';
         else if (v.status === 'Follow-up') badgeClass = 'tag-amber';
 
-        const alertBlock = v.alert ? `
-          <div class="visit-alert-box alert-${v.alert.priority.toLowerCase()}">
+        const alertObj = typeof v.alert === 'string'
+          ? (v.alert ? { title: 'Clinical Alert', reason: v.alert, priority: 'Urgent' } : null)
+          : v.alert;
+        const alertPriority = (alertObj && alertObj.priority) ? alertObj.priority : 'Moderate';
+        const alertBlock = alertObj ? `
+          <div class="visit-alert-box alert-${alertPriority.toLowerCase()}">
             <span class="alert-icon">⚠️</span>
             <div class="alert-content">
-              <span class="alert-title">${v.alert.title}</span>
-              <span class="alert-reason">${v.alert.reason}</span>
+              <span class="alert-title">${alertObj.title || 'Clinical Alert'}</span>
+              <span class="alert-reason">${alertObj.reason || ''}</span>
             </div>
           </div>
         ` : '';
@@ -1102,7 +1162,7 @@
           const lng = Number(activeLocation.lng);
           const accuracy = Math.round(activeLocation.accuracy || 12);
           const timeStr = activeLocation.formattedTime || (activeLocation.capturedAt ? new Date(activeLocation.capturedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'Just now');
-          const workerName = activeLocation.verifiedBy || 'Arunima Raj';
+          const workerName = activeLocation.verifiedBy || 'Asha';
 
           if (!isExpanded) {
             // Collapsed Compact View
@@ -1200,7 +1260,7 @@
             <div class="visit-card-top-row">
               <div class="visit-beneficiary-info">
                 <h3 class="visit-person-name">${v.personName}</h3>
-                <span class="visit-relation-tag">${v.relation} • ${v.village} (${v.householdId})</span>
+                <span class="visit-relation-tag">${v.relation} • ${v.village} (${v.householdId})${v.origin === 'priority_dashboard' ? ' <span class="origin-prio-badge">From Priority List</span>' : ''}</span>
               </div>
               <div class="visit-status-badge ${badgeClass}">${v.status}</div>
             </div>
@@ -1269,6 +1329,24 @@
       });
     }
 
+    filterVisits(statusFilter = 'all', btn = null) {
+      this.currentVisitFilter = statusFilter || 'all';
+      document.querySelectorAll('#visitsRegisterPanel .filter-pill-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.filter === this.currentVisitFilter);
+      });
+      if (btn) btn.classList.add('active');
+      this.renderVisitsList(this.currentVisitFilter, this.visitSearchQuery || '');
+    }
+
+    searchVisits(query = '') {
+      this.visitSearchQuery = query || '';
+      const input = document.getElementById('visitsSearchInput');
+      if (input && input.value !== this.visitSearchQuery) {
+        input.value = this.visitSearchQuery;
+      }
+      this.renderVisitsList(this.currentVisitFilter || 'all', this.visitSearchQuery);
+    }
+
     startTakeVisit(visitId) {
       const visit = this.visits.find(v => v.id === visitId);
       if (!visit) return;
@@ -1309,7 +1387,7 @@
             accuracy: Math.round(accuracy),
             timestamp: now.toISOString(),
             formattedTime: timeStr,
-            verifiedBy: 'Arunima Raj',
+            verifiedBy: 'Asha',
             expanded: true,
             error: null
           };
@@ -1374,7 +1452,7 @@
         lng: session.lng,
         accuracy: session.accuracy,
         capturedAt: session.timestamp,
-        verifiedBy: session.verifiedBy || 'Arunima Raj',
+        verifiedBy: session.verifiedBy || 'Asha',
         verified: true
       };
       visit.status = 'Complete';
@@ -1397,6 +1475,7 @@
       this.updateStats();
       this.showToast(`✓ Visit for ${visit.personName} confirmed & completed with GPS verification! ✓`);
       this.renderVisitsList(this.currentVisitFilter);
+      await this.fetchBackendData();
     }
 
     async startVoiceVisit(visitId) {
@@ -1406,57 +1485,20 @@
         return;
       }
 
-      const promptMsg = `Clinical Voice Note for ${visit.personName} (${visit.purpose}):\n\nEnter or record observation (e.g. "Mild fever and cough, BP normal", "Severe headache and vomiting"):`;
-      const note = window.prompt(promptMsg, visit.previousRecord || '');
-      if (note === null) return;
+      // Open the Sarvam AI Voice Assistant modal pre-bound to this visit
+      this._activeVisitVoiceId = visitId;
+      this.selectedHouseholdId = visit.beneficiary_id;
+      this.voiceDraft = null;
 
-      if (!note.trim()) {
-        this.showToast('No note entered.');
-        return;
-      }
+      const titleEl = document.getElementById('voiceModalTitle');
+      if (titleEl) titleEl.textContent = `Voice Note · ${visit.personName} (${visit.id})`;
+      const inputEl = document.getElementById('voiceTranscriptInput');
+      if (inputEl) inputEl.value = '';
+      const previewEl = document.getElementById('voicePreviewContainer');
+      if (previewEl) previewEl.innerHTML = '';
 
-      this.showToast('Processing clinical note with SAKHI engine...');
-      try {
-        const resp = await fetch('/api/voice/process-note', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ note, beneficiary_id: visit.beneficiary_id })
-        });
-        const data = await resp.json();
-
-        if (data.high_risk) {
-          alert(`⚠️ SAKHI CLINICAL ALERT (${data.severity}):\n\n${data.clinical_guidance}\n\nFlags: ${JSON.stringify(data.flags)}`);
-        }
-
-        visit.previousRecord = note;
-        visit.voice = note;
-        visit.status = 'Complete';
-        if (data.clinical_guidance) {
-          visit.alert = data.clinical_guidance;
-        }
-
-        await fetch(`/api/visits/${encodeURIComponent(visitId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            status: 'Complete',
-            note: note,
-            voice: note
-          })
-        });
-
-        this.saveState('sakhi_visits', this.visits);
-        this.updateStats();
-        this.renderVisitsList(this.currentVisitFilter);
-        this.showToast(`Clinical note saved for ${visit.personName}!`);
-      } catch (err) {
-        console.warn('Voice visit note error:', err);
-        visit.previousRecord = note;
-        visit.status = 'Complete';
-        this.saveState('sakhi_visits', this.visits);
-        this.renderVisitsList(this.currentVisitFilter);
-        this.showToast(`Note recorded locally for ${visit.personName}`);
-      }
+      this.openVoiceModal();
+      this.setVoiceStatus(`Tap Start Recording to dictate note for ${visit.personName} (${visit.purpose}).`);
     }
 
     renderVisitMap(visitId, lat, lng, accuracy) {
@@ -2257,9 +2299,20 @@
       const container = document.getElementById('alertsListContainer');
       if (!container) return;
 
-      let list = this.visits.filter(v => v.alert);
+      const normalizeAlert = (v) => {
+        if (!v.alert) return null;
+        if (typeof v.alert === 'string') {
+          return { title: 'Clinical Alert', reason: v.alert, priority: 'Urgent' };
+        }
+        return v.alert;
+      };
+
+      let list = this.visits.filter(v => normalizeAlert(v));
       if (priorityFilter !== 'all') {
-        list = list.filter(v => v.alert.priority.toLowerCase() === priorityFilter.toLowerCase());
+        list = list.filter(v => {
+          const a = normalizeAlert(v);
+          return a && (a.priority || 'Moderate').toLowerCase() === priorityFilter.toLowerCase();
+        });
       }
 
       if (list.length === 0) {
@@ -2267,32 +2320,35 @@
         return;
       }
 
-      container.innerHTML = list.map(v => `
+      container.innerHTML = list.map(v => {
+        const a = normalizeAlert(v);
+        const priority = a.priority || 'Moderate';
+        return `
         <div class="visit-clinical-card status-border-crimson">
           <div class="visit-card-top-row">
             <div class="visit-beneficiary-info">
-              <h3 class="visit-person-name">${v.personName}</h3>
-              <span class="visit-relation-tag">${v.relation} • ${v.village}</span>
+              <h3 class="visit-person-name">${v.personName || 'Beneficiary'}</h3>
+              <span class="visit-relation-tag">${v.relation || 'Patient'} • ${v.village || ''}</span>
             </div>
-            <div class="visit-status-badge ${v.alert.priority === 'Urgent' ? 'tag-crimson' : 'tag-amber'}">${v.alert.priority} Priority</div>
+            <div class="visit-status-badge ${priority === 'Urgent' ? 'tag-crimson' : 'tag-amber'}">${priority} Priority</div>
           </div>
 
-          <div class="visit-alert-box alert-${v.alert.priority.toLowerCase()}">
+          <div class="visit-alert-box alert-${priority.toLowerCase()}">
             <span class="alert-icon">⚠️</span>
             <div class="alert-content">
-              <span class="alert-title">${v.alert.title}</span>
-              <span class="alert-reason">${v.alert.reason}</span>
+              <span class="alert-title">${a.title || 'Clinical Alert'}</span>
+              <span class="alert-reason">${a.reason || ''}</span>
             </div>
           </div>
 
           <div class="visit-event-badge">
             <span class="event-icon">⚡</span>
-            <span class="event-text">Triggering Event: ${v.event}</span>
+            <span class="event-text">Triggering Event: ${v.event || v.previousRecord || 'Clinical flag recorded'}</span>
           </div>
 
           <div class="visit-reasoning-box">
             <span class="reasoning-label">Protocol Reasoning:</span>
-            <p class="reasoning-text">${v.ruleExplanation}</p>
+            <p class="reasoning-text">${v.ruleExplanation || 'Follow National Health Mission protocol and notify ANM.'}</p>
           </div>
 
           <div class="visit-card-footer">
@@ -2301,16 +2357,17 @@
               <span class="due-date text-crimson">${v.status}</span>
             </div>
             <div class="visit-actions-group">
-              <button class="btn-visit-action btn-visit-complete" onclick="sakhiApp.showToast('Triage acknowledged for ${v.personName}')">
+              <button class="btn-visit-action btn-visit-complete" onclick="sakhiApp.showToast('Triage acknowledged for ${v.personName || 'Beneficiary'}')">
                 Acknowledge
               </button>
-              <button class="btn-visit-action btn-voice-visit" onclick="sakhiApp.navigateTo('visits'); sakhiApp.searchVisits('${v.personName}')">
+              <button class="btn-visit-action btn-voice-visit" onclick="sakhiApp.navigateTo('visits'); sakhiApp.switchVisitsSubtab('register'); sakhiApp.searchVisits('${(v.personName || '').replace(/'/g, "\\'")}')">
                 Visit Now
               </button>
             </div>
           </div>
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
 
     filterAlerts(priority, btn) {
@@ -2376,24 +2433,55 @@
       scroll.scrollTop = scroll.scrollHeight;
 
       let responseText = "";
+      let chatPayload = null;
       try {
         const resp = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: text })
+          body: JSON.stringify({
+            query: text,
+            beneficiary_id: this.selectedHouseholdId || this.selectedMother?.id || this.selectedBaby?.id || null,
+            current_draft: this.voiceDraft || null,
+            screen_context: this.captureVisibleScreenContext(),
+            shared_tab_context: this.getSharedTabContext(),
+            language_code: ({ en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' }[this.currentLang] || 'en-IN'),
+            conversation_history: (this.chatHistory || []).slice(-6)
+          })
         });
         if (resp.ok) {
-          const data = await resp.json();
-          responseText = data.response || this.generateAshaAdvice(text);
+          chatPayload = await resp.json();
+          responseText = chatPayload.response || this.generateAshaAdvice(text);
+          this.chatHistory.push({ role: 'user', content: text });
+          this.chatHistory.push({ role: 'assistant', content: responseText });
         } else {
-          responseText = this.generateAshaAdvice(text);
+          responseText = `Assistant API error (HTTP ${resp.status}). Please try again.`;
         }
       } catch (err) {
-        responseText = this.generateAshaAdvice(text);
+        responseText = 'Unable to reach SAKHI assistant backend. Please check that the local server is running.';
       }
 
       const typingEl = document.getElementById(typingId);
       if (typingEl) typingEl.remove();
+
+      const safeResp = this.escapeHtml(responseText).replace(/\n/g, '<br>');
+      const sourceBadge = chatPayload?.source
+        ? `<div style="font-size:0.7rem;color:#64748B;margin-top:0.25rem;">Source: ${this.escapeHtml(chatPayload.source)}</div>`
+        : '';
+      const ttsText = chatPayload?.tts_text || responseText;
+      const ttsBtnId = `ttsBtn-${Date.now()}`;
+      const actionPreview = chatPayload?.action_preview;
+      let actionHtml = '';
+      if (actionPreview && actionPreview.requires_confirmation) {
+        this._pendingChatAction = actionPreview;
+        actionHtml = `
+          <div style="margin-top:0.5rem;padding:0.5rem;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;font-size:0.78rem;">
+            <strong>${this.escapeHtml(actionPreview.preview_title || 'Action Ready')}</strong>
+            <div style="margin-top:0.35rem;display:flex;gap:0.4rem;">
+              <button class="btn-visit-action btn-take-visit" onclick="sakhiApp.openVoiceModalWithPreview()">Review & Confirm</button>
+            </div>
+          </div>
+        `;
+      }
 
       const botHtml = `
         <div class="chat-row bot-row">
@@ -2406,7 +2494,10 @@
             </svg>
           </div>
           <div class="chat-bubble bot-bubble">
-            <p class="bubble-text">${this.escapeHtml(responseText)}</p>
+            <p class="bubble-text">${safeResp}</p>
+            ${sourceBadge}
+            ${actionHtml}
+            <button type="button" id="${ttsBtnId}" class="btn-chat-tts" onclick="sakhiApp.speakText(${JSON.stringify(ttsText)}, '${ttsBtnId}')">🔊 Play</button>
             <div class="bubble-meta">
               <span class="bubble-time">${timeStr}</span>
             </div>
@@ -2597,7 +2688,50 @@
     }
 
     showNotificationsModal() {
-      this.showToast('3 Reminders: 2 ANC visits tomorrow, 1 baby Pentavalent-3 due');
+      const modal = document.getElementById('optionsModal');
+      const list = document.getElementById('optionsActionsList');
+      const title = document.getElementById('optionsSheetTitle');
+      if (!modal || !list || !title) {
+        this.showToast('Notifications unavailable');
+        return;
+      }
+
+      title.textContent = 'Need Attention';
+      const urgentItems = (this.priorities || []).filter(h =>
+        ['immediate_escalation', 'high_priority', 'overdue', 'due_today'].includes(h.status_bucket)
+      );
+
+      if (urgentItems.length === 0) {
+        list.innerHTML = `
+          <div class="notif-empty">✓ All households are up to date.</div>
+        `;
+      } else {
+        const topItems = urgentItems.slice(0, 4);
+        const rowsHtml = topItems.map(h => {
+          const isRed = h.priority_code === 'RED';
+          const pillCls = isRed ? 'notif-pill-red' : (h.priority_code === 'ORANGE' ? 'notif-pill-orange' : 'notif-pill-yellow');
+          const pillTxt = isRed ? 'URGENT' : (h.priority_code === 'ORANGE' ? 'HIGH' : (h.due_today ? 'TODAY' : `${h.overdue_days}d OVERDUE`));
+          return `
+            <button class="notif-item ${isRed ? 'notif-item-red' : ''}" onclick="sakhiApp.closeOptionsMenu(); sakhiApp.openHouseholdDetail('${this.escapeHtml(h.beneficiary_id)}')">
+              <div class="notif-item-top">
+                <span class="notif-name">${this.escapeHtml(h.name)} <small>(${this.escapeHtml(h.beneficiary_id)})</small></span>
+                <span class="notif-pill ${pillCls}">${this.escapeHtml(pillTxt)}</span>
+              </div>
+              <span class="notif-reason">${this.escapeHtml(h.primary_reason)}</span>
+            </button>
+          `;
+        }).join('');
+
+        const moreCount = Math.max(0, urgentItems.length - topItems.length);
+        list.innerHTML = `
+          <div class="notif-list-wrap">${rowsHtml}</div>
+          <button class="notif-view-all-btn" onclick="sakhiApp.closeOptionsMenu(); sakhiApp.openPriorityQueue('all')">
+            ${moreCount > 0 ? `View all ${urgentItems.length} priority alerts →` : 'Open Priority Queue →'}
+          </button>
+        `;
+      }
+
+      modal.classList.add('open');
     }
 
     showToast(message) {
@@ -2618,6 +2752,1416 @@
       const div = document.createElement('div');
       div.textContent = text;
       return div.innerHTML;
+    }
+
+    // ============================================================
+    // HOUSEHOLD PRIORITIZATION INTELLIGENCE WORKFLOW
+    // ============================================================
+    async fetchPriorities() {
+      try {
+        const params = new URLSearchParams({
+          filter_by: this.currentPriorityFilter || 'all',
+          sort_by: this.currentPrioritySort || 'priority',
+          search: this.prioritySearchQuery || ''
+        });
+        const resp = await fetch(`/api/priorities?${params.toString()}`);
+        if (!resp.ok) return;
+        const payload = await resp.json();
+        if (payload.success) {
+          this.priorities = payload.data || [];
+          this.prioritySummary = payload.summary || null;
+          this.renderPrioritySummary();
+          this.renderPrioritiesList();
+        }
+      } catch (err) {
+        console.warn('Priority fetch failed:', err);
+      }
+    }
+
+    renderPrioritySummary() {
+      const s = this.prioritySummary;
+      if (!s) return;
+      const setTxt = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val ?? 0;
+      };
+      setTxt('prioTotalHouseholds', s.total_households);
+      setTxt('prioRedCount', s.immediate_escalation);
+      setTxt('prioOrangeCount', s.high_priority);
+      setTxt('prioOverdueCount', s.overdue);
+      setTxt('prioDueTodayCount', s.due_today);
+      setTxt('prioUpcomingCount', s.upcoming);
+      setTxt('prioRoutineCount', s.routine);
+      setTxt('prioMissingCount', s.missing_data);
+      const refEl = document.getElementById('priorityRefDate');
+      if (refEl && s.reference_date) {
+        refEl.textContent = `Ref: ${s.reference_date}`;
+      }
+    }
+
+    openPriorityQueue(filter = 'all') {
+      this.navigateTo('visits');
+      this.switchVisitsSubtab('priority');
+      this.filterPriorities(filter);
+    }
+
+    switchVisitsSubtab(subtab) {
+      const prioPanel = document.getElementById('visitsPriorityPanel');
+      const regPanel = document.getElementById('visitsRegisterPanel');
+      document.querySelectorAll('#visitsSubtabBar .visits-subtab-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.subtab === subtab);
+      });
+      if (prioPanel) prioPanel.style.display = subtab === 'priority' ? 'block' : 'none';
+      if (regPanel) regPanel.style.display = subtab === 'register' ? 'block' : 'none';
+    }
+
+    filterPriorities(filter, btn) {
+      this.currentPriorityFilter = filter || 'all';
+      document.querySelectorAll('#priorityFilterBar .filter-pill-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.prioFilter === this.currentPriorityFilter);
+      });
+      if (btn) btn.classList.add('active');
+      this.fetchPriorities();
+    }
+
+    setPrioritySort(sortBy) {
+      this.currentPrioritySort = sortBy || 'priority';
+      this.fetchPriorities();
+    }
+
+    searchPriorities(query) {
+      this.prioritySearchQuery = query || '';
+      this.fetchPriorities();
+    }
+
+    renderPrioritiesList() {
+      const container = document.getElementById('priorityListContainer');
+      if (!container) return;
+
+      const list = this.priorities || [];
+      if (list.length === 0) {
+        container.innerHTML = `<div class="empty-state-card"><p>No households match this filter.</p></div>`;
+        return;
+      }
+
+      container.innerHTML = list.map(h => {
+        const code = (h.priority_code || 'GREEN').toLowerCase();
+        const badgeLabel = `${h.priority_code} · ${h.priority_label}`;
+        const escalationBlock = h.escalation ? `
+          <div class="prio-escalation-box">
+            <div class="prio-esc-title">⚠️ ${this.escapeHtml(h.escalation.warning)}</div>
+            <div class="prio-esc-trigger">Trigger: ${this.escapeHtml(h.escalation.trigger_indicator)}</div>
+            <div class="prio-esc-instr">${this.escapeHtml(h.escalation.instruction)}</div>
+            <div class="prio-esc-disc">${this.escapeHtml(h.escalation.disclaimer)}</div>
+          </div>
+        ` : '';
+
+        const missingBlock = h.has_missing_data ? `
+          <div class="prio-missing-banner">
+            <span>🔍 ${this.escapeHtml(h.verification_warning || 'Missing data requires verification.')}</span>
+          </div>
+        ` : '';
+
+        const dueStr = h.followup_date ? this.escapeHtml(h.followup_date) : 'No date scheduled';
+        const safeName = this.escapeHtml(h.name || h.beneficiary_id);
+
+        return `
+          <div class="prio-household-card prio-border-${code}">
+            <div class="prio-card-top">
+              <div class="prio-card-id-block">
+                <div class="prio-card-title-row">
+                  <span class="prio-ben-id">${this.escapeHtml(h.beneficiary_id)}</span>
+                  <h4 class="prio-ben-name">${safeName}</h4>
+                </div>
+                <div class="prio-meta-row">
+                  <span class="prio-type-chip">${this.escapeHtml(h.beneficiary_type)}</span>
+                  <span class="prio-address-txt">📍 ${this.escapeHtml(h.address)}</span>
+                </div>
+              </div>
+              <span class="prio-badge prio-badge-${code}">${this.escapeHtml(badgeLabel)}</span>
+            </div>
+
+            ${escalationBlock}
+
+            <div class="prio-reason-box">
+              <span class="prio-reason-lbl">${this.escapeHtml(this.t('whyPrioritized'))}</span>
+              <span class="prio-reason-txt">${this.escapeHtml(h.primary_reason)}</span>
+            </div>
+
+            ${missingBlock}
+
+            <div class="prio-action-meta">
+              <div><strong>${this.escapeHtml(this.t('followupLbl'))}</strong> ${dueStr}</div>
+              <div><strong>${this.escapeHtml(this.t('nextActionLbl'))}</strong> ${this.escapeHtml(h.suggested_action)}</div>
+            </div>
+
+            <div class="prio-card-actions">
+              <button class="btn-visit-action btn-voice-visit" onclick="sakhiApp.openHouseholdDetail('${this.escapeHtml(h.beneficiary_id)}')">
+                ${this.escapeHtml(this.t('openHousehold'))}
+              </button>
+              <button class="btn-visit-action btn-take-visit" onclick="sakhiApp.openPlanVisitModal('${this.escapeHtml(h.beneficiary_id)}', '${safeName.replace(/'/g, "\\'")}')">
+                ${this.escapeHtml(this.t('planVisit'))}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async openHouseholdDetail(beneficiaryId) {
+      this.selectedHouseholdId = beneficiaryId;
+      this.navigateTo('household-detail');
+      await this.loadHouseholdDetail(beneficiaryId);
+    }
+
+    async loadHouseholdDetail(beneficiaryId) {
+      const body = document.getElementById('householdDetailBody');
+      if (body) body.innerHTML = `<div class="empty-state-card"><p>Loading household ${this.escapeHtml(beneficiaryId)}...</p></div>`;
+      try {
+        const resp = await fetch(`/api/priorities/${encodeURIComponent(beneficiaryId)}`);
+        if (!resp.ok) {
+          if (body) body.innerHTML = `<div class="empty-state-card"><p>Could not load household detail.</p></div>`;
+          return;
+        }
+        const payload = await resp.json();
+        this.selectedHouseholdDetail = payload.data;
+        this.renderHouseholdDetail(payload.data);
+      } catch (err) {
+        if (body) body.innerHTML = `<div class="empty-state-card"><p>Error loading household detail.</p></div>`;
+      }
+    }
+
+    renderHouseholdDetail(detail) {
+      const body = document.getElementById('householdDetailBody');
+      const header = document.getElementById('householdDetailHeaderTitle');
+      if (!body || !detail || !detail.priority) return;
+
+      const p = detail.priority;
+      if (header) header.textContent = `${p.beneficiary_id} · ${p.name}`;
+
+      const code = (p.priority_code || 'GREEN').toLowerCase();
+      const reasonsHtml = (p.reasons || []).map(r => `<li>${this.escapeHtml(r)}</li>`).join('');
+      const missingHtml = p.has_missing_data
+        ? `<div class="prio-missing-banner"><strong>Verification Required:</strong> ${this.escapeHtml((p.missing_data_items || []).join(', '))}</div>`
+        : `<div class="detail-verified-note">✓ Core household fields present.</div>`;
+
+      const visitsHtml = (detail.visits || []).length === 0
+        ? `<p class="empty-sub">No visits recorded yet for this household.</p>`
+        : detail.visits.map(v => {
+            const done = !!(v.visit_ts && String(v.visit_ts).trim());
+            return `
+              <div class="detail-visit-row">
+                <div>
+                  <strong>${this.escapeHtml(v.id)} · ${this.escapeHtml(v.type || 'Visit')}</strong>
+                  <div class="detail-visit-sub">Due: ${this.escapeHtml(v.due_date || '-')} | Flag: ${this.escapeHtml(v.flag || 'N')} | ${done ? 'Completed: ' + this.escapeHtml(v.visit_ts) : 'Pending'}</div>
+                  ${v.note ? `<div class="detail-visit-note">${this.escapeHtml(v.note)}</div>` : ''}
+                </div>
+                ${done
+                  ? `<span class="visit-status-badge tag-emerald">Complete</span>`
+                  : `<button class="btn-visit-action btn-visit-complete" onclick="sakhiApp.completeVisitFromDetail('${this.escapeHtml(v.id)}', '${this.escapeHtml(p.beneficiary_id)}')">Complete</button>`
+                }
+              </div>
+            `;
+          }).join('');
+
+      const preg = detail.pregnancy;
+      const child = detail.child;
+      let beneficiaryHtml = '';
+      if (preg) {
+        beneficiaryHtml += `
+          <div class="detail-visit-row">
+            <div>
+              <strong>Maternal Record (${this.escapeHtml(preg.status || 'ACTIVE')})</strong>
+              <div class="detail-visit-sub">
+                Name: ${this.escapeHtml(preg.mother_name || 'Missing — Verify')} |
+                Week: ${this.escapeHtml(String(preg.week ?? '-'))} |
+                EDD: ${this.escapeHtml(preg.exp_dd || 'Missing — Verify')} |
+                Weight: ${preg.weight != null ? this.escapeHtml(String(preg.weight)) + ' kg' : 'Missing — Verify'} |
+                Mobile: ${this.escapeHtml(preg.mobile || 'Missing — Verify')}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      if (child) {
+        beneficiaryHtml += `
+          <div class="detail-visit-row">
+            <div>
+              <strong>Child Record (${this.escapeHtml(child.child_name || 'Unnamed')})</strong>
+              <div class="detail-visit-sub">
+                DOB: ${this.escapeHtml(child.dob || 'Missing — Verify')} |
+                Age: ${this.escapeHtml(String(child.age ?? '-'))} |
+                Next Visit: ${this.escapeHtml(child.next_visit || 'Missing — Verify')}
+              </div>
+              <div class="detail-visit-note">Vaccines Due: ${this.escapeHtml(child.vacs_due || 'None recorded')}</div>
+            </div>
+          </div>
+        `;
+      }
+      if (!beneficiaryHtml) {
+        beneficiaryHtml = `<p class="empty-sub">General household record (${this.escapeHtml(p.home_status)}).</p>`;
+      }
+
+      body.innerHTML = `
+        <div class="prio-household-card prio-border-${code}">
+          <div class="prio-card-top">
+            <div>
+              <h3 class="prio-ben-name">${this.escapeHtml(p.name)} (${this.escapeHtml(p.beneficiary_id)})</h3>
+              <div class="prio-meta-row">
+                <span class="prio-type-chip">${this.escapeHtml(p.beneficiary_type)}</span>
+                <span class="prio-address-txt">📍 ${this.escapeHtml(p.address)}</span>
+              </div>
+            </div>
+            <span class="prio-badge prio-badge-${code}">${this.escapeHtml(p.priority_code)} · ${this.escapeHtml(p.priority_label)}</span>
+          </div>
+          ${p.escalation ? `
+            <div class="prio-escalation-box">
+              <div class="prio-esc-title">⚠️ ${this.escapeHtml(p.escalation.warning)}</div>
+              <div class="prio-esc-trigger">${this.escapeHtml(p.escalation.trigger_indicator)}</div>
+              <div class="prio-esc-instr">${this.escapeHtml(p.escalation.instruction)}</div>
+              <div class="prio-esc-disc">${this.escapeHtml(p.escalation.disclaimer)}</div>
+            </div>
+          ` : ''}
+          <div class="prio-reason-box">
+            <span class="prio-reason-lbl">Priority Explanation (Rule-Based):</span>
+            <ul class="detail-reasons-list">${reasonsHtml}</ul>
+          </div>
+          ${missingHtml}
+          <div class="prio-action-meta">
+            <div><strong>Suggested Next Action:</strong> ${this.escapeHtml(p.suggested_action)}</div>
+          </div>
+          <div class="prio-card-actions">
+            <button class="btn-visit-action btn-take-visit" onclick="sakhiApp.openPlanVisitModal('${this.escapeHtml(p.beneficiary_id)}', '${this.escapeHtml(p.name).replace(/'/g, "\\'")}')">
+              + Plan Visit / Follow-up
+            </button>
+            <button class="btn-visit-action btn-voice-visit" onclick="sakhiApp.navigateTo('visits'); sakhiApp.switchVisitsSubtab('register'); sakhiApp.searchVisits('${this.escapeHtml(p.beneficiary_id)}')">
+              Open in Visits Register
+            </button>
+          </div>
+        </div>
+
+        <div class="detail-section-card">
+          <h4>Beneficiary Information</h4>
+          ${beneficiaryHtml}
+        </div>
+
+        <div class="detail-section-card">
+          <h4>Visit & Follow-up History (${(detail.visits || []).length})</h4>
+          ${visitsHtml}
+        </div>
+      `;
+    }
+
+    async completeVisitFromDetail(visitId, beneficiaryId) {
+      try {
+        const resp = await fetch(`/api/visits/${encodeURIComponent(visitId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Complete' })
+        });
+        if (resp.ok) {
+          this.showToast(`Visit ${visitId} marked complete! Updating priorities...`);
+          await this.fetchBackendData();
+          await this.loadHouseholdDetail(beneficiaryId);
+        }
+      } catch (err) {
+        this.showToast('Failed to update visit.');
+      }
+    }
+
+    openPlanVisitModalForCurrent() {
+      if (this.selectedHouseholdDetail?.priority) {
+        const p = this.selectedHouseholdDetail.priority;
+        this.openPlanVisitModal(p.beneficiary_id, p.name);
+      }
+    }
+
+    openPlanVisitModal(beneficiaryId, name) {
+      const modal = document.getElementById('planVisitModal');
+      const title = document.getElementById('planVisitModalTitle');
+      const idInput = document.getElementById('planVisitBenId');
+      const dateInput = document.getElementById('planVisitDueDate');
+      const noteInput = document.getElementById('planVisitNote');
+      if (!modal || !idInput) return;
+
+      idInput.value = beneficiaryId;
+      if (title) title.textContent = `Plan Visit · ${name || beneficiaryId}`;
+      if (dateInput && !dateInput.value) {
+        dateInput.value = new Date().toISOString().slice(0, 10);
+      }
+      if (noteInput) noteInput.value = '';
+      modal.classList.add('open');
+    }
+
+    closePlanVisitModal() {
+      const modal = document.getElementById('planVisitModal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    async submitPlanVisit(event) {
+      if (event) event.preventDefault();
+      const benId = document.getElementById('planVisitBenId')?.value;
+      const visitType = document.getElementById('planVisitType')?.value || 'ANC';
+      const dueDate = document.getElementById('planVisitDueDate')?.value;
+      const flag = document.getElementById('planVisitFlag')?.value || 'N';
+      const note = document.getElementById('planVisitNote')?.value || '';
+      if (!benId || !dueDate) return;
+
+      const btn = document.getElementById('btnSubmitPlanVisit');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+      try {
+        const resp = await fetch('/api/visits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            beneficiary_id: benId,
+            visit_type: visitType,
+            due_date: dueDate,
+            flag,
+            note,
+            origin: 'priority_dashboard'
+          })
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          this.closePlanVisitModal();
+          this.showToast(`Visit ${data.visit_id || ''} planned for ${benId} in Field Visits Register!`);
+          await this.fetchBackendData();
+          if (this.currentScreen === 'household-detail' && this.selectedHouseholdId === benId) {
+            await this.loadHouseholdDetail(benId);
+          }
+        } else {
+          this.showToast(data.detail || 'Could not schedule visit.');
+        }
+      } catch (err) {
+        this.showToast('Error scheduling visit.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Visit to Register'; }
+      }
+    }
+
+    // ============================================================
+    // MULTI-LANGUAGE INTERFACE (ENGLISH / HINDI / KANNADA)
+    // ============================================================
+    setLanguage(lang) {
+      if (!['en', 'hi', 'kn'].includes(lang)) lang = 'en';
+      this.currentLang = lang;
+      try { localStorage.setItem('sakhi_lang', lang); } catch (e) {}
+      this.applyLanguage(lang);
+      const names = { en: 'English', hi: 'हिन्दी (Hindi)', kn: 'ಕನ್ನಡ (Kannada)' };
+      this.showToast(`Language switched to ${names[lang]}`);
+    }
+
+    t(key) {
+      const dict = {
+        en: {
+          greeting: 'Hello, ASHA Worker!',
+          greetingSub: 'SAKHI Priority Summary · Tap any card to open Visits Queue',
+          prioSummary: 'Household Priority Summary',
+          totalHouseholds: 'Total Households',
+          immediateRed: 'Immediate (RED)',
+          highPriority: 'High Priority',
+          overdue: 'Overdue',
+          dueToday: 'Due Today',
+          upcoming: 'Upcoming',
+          routineGreen: 'Routine (GREEN)',
+          needsVerification: 'Needs Verification',
+          navHome: 'Home',
+          navVisits: 'Visits',
+          navFollowups: 'Follow-ups',
+          navAlerts: 'Alerts',
+          navMaternal: 'Maternal Health',
+          navVaccine: 'Vaccine Tracker',
+          navNearby: 'Nearby Clinics & Hospitals',
+          navChat: 'AI Chatbot',
+          navProfile: 'My Profile',
+          logout: 'Logout',
+          aiChatbot: 'AI Chatbot',
+          aiChatbotSub: 'Ask health queries and get instant guidance',
+          maternalHealth: 'Maternal health',
+          maternalHealthSub: 'Track & access maternal health information',
+          vaccineTracker: 'Vaccine tracker',
+          vaccineTrackerSub: 'Track child vaccination schedules',
+          fieldRegisterSummary: 'Field Register Summary',
+          mothersRegistered: 'Mothers Registered',
+          babiesTracked: 'Babies Tracked',
+          dueThisWeek: 'Due This Week',
+          visitsHeader: 'Field Visits',
+          subtabPriority: 'Priority Queue (Households)',
+          subtabRegister: 'Field Visits Register',
+          prioritizedHouseholds: 'Prioritized Households',
+          searchPrioPlaceholder: 'Search household ID, name, area, or reason...',
+          searchVisitsPlaceholder: 'Search by name, village or purpose',
+          whyPrioritized: 'Why prioritized:',
+          followupLbl: 'Follow-up:',
+          nextActionLbl: 'Next Action:',
+          openHousehold: 'Open Household',
+          planVisit: 'Plan Visit',
+          followupsHeader: 'Follow-ups',
+          alertsHeader: 'Clinical Alerts'
+        },
+        hi: {
+          greeting: 'नमस्ते, आशा कार्यकर्ता!',
+          greetingSub: 'सखी प्राथमिकता सारांश · विज़िट कतार खोलने के लिए किसी भी कार्ड पर टैप करें',
+          prioSummary: 'परिवार प्राथमिकता सारांश',
+          totalHouseholds: 'कुल परिवार',
+          immediateRed: 'तत्काल (लाल)',
+          highPriority: 'उच्च प्राथमिकता',
+          overdue: 'अतिदेय (बाकी)',
+          dueToday: 'आज देय',
+          upcoming: 'आगामी',
+          routineGreen: 'सामान्य (हरा)',
+          needsVerification: 'सत्यापन आवश्यक',
+          navHome: 'होम',
+          navVisits: 'विज़िट',
+          navFollowups: 'फॉलो-अप',
+          navAlerts: 'अलर्ट',
+          navMaternal: 'मातृ स्वास्थ्य',
+          navVaccine: 'टीकाकरण ट्रैकर',
+          navNearby: 'नजदीकी क्लिनिक व अस्पताल',
+          navChat: 'AI चैटबॉट',
+          navProfile: 'मेरी प्रोफ़ाइल',
+          logout: 'लॉगआउट',
+          aiChatbot: 'AI चैटबॉट',
+          aiChatbotSub: 'स्वास्थ्य प्रश्न पूछें और तुरंत मार्गदर्शन पाएं',
+          maternalHealth: 'मातृ स्वास्थ्य',
+          maternalHealthSub: 'मातृ स्वास्थ्य जानकारी देखें और ट्रैक करें',
+          vaccineTracker: 'टीकाकरण ट्रैकर',
+          vaccineTrackerSub: 'बच्चों के टीकाकरण शेड्यूल को ट्रैक करें',
+          fieldRegisterSummary: 'फ़ील्ड रजिस्टर सारांश',
+          mothersRegistered: 'पंजीकृत माताएं',
+          babiesTracked: 'ट्रैक किए गए शिशु',
+          dueThisWeek: 'इस सप्ताह देय',
+          visitsHeader: 'फ़ील्ड विज़िट',
+          subtabPriority: 'प्राथमिकता कतार (परिवार)',
+          subtabRegister: 'फ़ील्ड विज़िट रजिस्टर',
+          prioritizedHouseholds: 'प्राथमिकता वाले परिवार',
+          searchPrioPlaceholder: 'परिवार ID, नाम, क्षेत्र या कारण खोजें...',
+          searchVisitsPlaceholder: 'नाम, गाँव या उद्देश्य से खोजें',
+          whyPrioritized: 'प्राथमिकता का कारण:',
+          followupLbl: 'फॉलो-अप:',
+          nextActionLbl: 'अगला कदम:',
+          openHousehold: 'परिवार खोलें',
+          planVisit: 'विज़िट योजना',
+          followupsHeader: 'फॉलो-अप',
+          alertsHeader: 'क्लिनिकल अलर्ट'
+        },
+        kn: {
+          greeting: 'ನಮಸ್ಕಾರ, ಆಶಾ ಕಾರ್ಯಕರ್ತೆ!',
+          greetingSub: 'ಸಖಿ ಆದ್ಯತೆ ಸಾರಾಂಶ · ಭೇಟಿ ಪಟ್ಟಿಯನ್ನು ತೆರೆಯಲು ಕಾರ್ಡ್ ಟ್ಯಾಪ್ ಮಾಡಿ',
+          prioSummary: 'ಕುಟುಂಬ ಆದ್ಯತೆ ಸಾರಾಂಶ',
+          totalHouseholds: 'ಒಟ್ಟು ಕುಟುಂಬಗಳು',
+          immediateRed: 'ತಕ್ಷಣ (ಕೆಂಪು)',
+          highPriority: 'ಹೆಚ್ಚಿನ ಆದ್ಯತೆ',
+          overdue: 'ಬಾಕಿ ಇರುವ',
+          dueToday: 'ಇಂದು ಬಾಕಿ',
+          upcoming: 'ಮುಂಬರುವ',
+          routineGreen: 'ಸಾಮಾನ್ಯ (ಹಸಿರು)',
+          needsVerification: 'ಪರಿಶೀಲನೆ ಅಗತ್ಯ',
+          navHome: 'ಮುಖಪುಟ',
+          navVisits: 'ಭೇಟಿಗಳು',
+          navFollowups: 'ಫಾಲೋ-ಅಪ್',
+          navAlerts: 'ಎಚ್ಚರಿಕೆಗಳು',
+          navMaternal: 'ತಾಯಂದಿರ ಆರೋಗ್ಯ',
+          navVaccine: 'ಲಸಿಕೆ ಟ್ರ್ಯಾಕರ್',
+          navNearby: 'ಹತ್ತಿರದ ಕ್ಲಿನಿಕ್ ಮತ್ತು ಆಸ್ಪತ್ರೆಗಳು',
+          navChat: 'AI ಚಾಟ್‌ಬಾಟ್',
+          navProfile: 'ನನ್ನ ಪ್ರೊಫೈಲ್',
+          logout: 'ಲಾಗ್‌ಔಟ್',
+          aiChatbot: 'AI ಚಾಟ್‌ಬಾಟ್',
+          aiChatbotSub: 'ಆರೋಗ್ಯ ಪ್ರಶ್ನೆಗಳನ್ನು ಕೇಳಿ ಮತ್ತು ತಕ್ಷಣ ಮಾರ್ಗದರ್ಶನ ಪಡೆಯಿರಿ',
+          maternalHealth: 'ತಾಯಂದಿರ ಆರೋಗ್ಯ',
+          maternalHealthSub: 'ತಾಯಂದಿರ ಆರೋಗ್ಯ ಮಾಹಿತಿಯನ್ನು ಟ್ರ್ಯಾಕ್ ಮಾಡಿ',
+          vaccineTracker: 'ಲಸಿಕೆ ಟ್ರ್ಯಾಕರ್',
+          vaccineTrackerSub: 'ಮಕ್ಕಳ ಲಸಿಕೆ ವೇಳಾಪಟ್ಟಿಯನ್ನು ಟ್ರ್ಯಾಕ್ ಮಾಡಿ',
+          fieldRegisterSummary: 'ಕ್ಷೇತ್ರ ನೋಂದಣಿ ಸಾರಾಂಶ',
+          mothersRegistered: 'ನೋಂದಾಯಿತ ತಾಯಂದಿರು',
+          babiesTracked: 'ಟ್ರ್ಯಾಕ್ ಮಾಡಿದ ಶಿಶುಗಳು',
+          dueThisWeek: 'ಈ ವಾರ ಬಾಕಿ',
+          visitsHeader: 'ಕ್ಷೇತ್ರ ಭೇಟಿಗಳು',
+          subtabPriority: 'ಆದ್ಯತೆ ಪಟ್ಟಿ (ಕುಟುಂಬಗಳು)',
+          subtabRegister: 'ಕ್ಷೇತ್ರ ಭೇಟಿ ನೋಂದಣಿ',
+          prioritizedHouseholds: 'ಆದ್ಯತೆಯ ಕುಟುಂಬಗಳು',
+          searchPrioPlaceholder: 'ಕುಟುಂಬ ID, ಹೆಸರು, ಪ್ರದೇಶ ಅಥವಾ ಕಾರಣ ಹುಡುಕಿ...',
+          searchVisitsPlaceholder: 'ಹೆಸರು, ಗ್ರಾಮ ಅಥವಾ ಉದ್ದೇಶದಿಂದ ಹುಡುಕಿ',
+          whyPrioritized: 'ಆದ್ಯತೆಯ ಕಾರಣ:',
+          followupLbl: 'ಫಾಲೋ-ಅಪ್:',
+          nextActionLbl: 'ಮುಂದಿನ ಕ್ರಮ:',
+          openHousehold: 'ಕುಟುಂಬ ತೆರೆಯಿರಿ',
+          planVisit: 'ಭೇಟಿ ಯೋಜಿಸಿ',
+          followupsHeader: 'ಫಾಲೋ-ಅಪ್‌ಗಳು',
+          alertsHeader: 'ಕ್ಲಿನಿಕಲ್ ಎಚ್ಚರಿಕೆಗಳು'
+        }
+      };
+      const table = dict[this.currentLang] || dict.en;
+      return table[key] || dict.en[key] || key;
+    }
+
+    applyLanguage(lang) {
+      this.currentLang = lang || 'en';
+      if (typeof document !== 'undefined' && document.documentElement) {
+        document.documentElement.lang = this.currentLang;
+      }
+
+      document.querySelectorAll('.btn-lang-toggle, .btn-lang-mini').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === this.currentLang);
+      });
+
+      // Update speech recognition language if active
+      if (this.speechRecognition) {
+        const speechMap = { en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
+        this.speechRecognition.lang = speechMap[this.currentLang] || 'en-IN';
+      }
+
+      const setSel = (sel, text) => {
+        const el = document.querySelector(sel);
+        if (el) el.textContent = text;
+      };
+
+      // Home
+      setSel('#screen-home .home-greeting-title', this.t('greeting'));
+      setSel('#screen-home .home-greeting-sub', this.t('greetingSub'));
+      setSel('#screen-home .dash-title', this.t('prioSummary'));
+      setSel('.kpi-total .prio-kpi-label', this.t('totalHouseholds'));
+      setSel('.kpi-red .prio-kpi-label', this.t('immediateRed'));
+      setSel('.kpi-orange .prio-kpi-label', this.t('highPriority'));
+      setSel('.kpi-overdue .prio-kpi-label', this.t('overdue'));
+      setSel('.kpi-due .prio-kpi-label', this.t('dueToday'));
+      setSel('.kpi-upcoming .prio-kpi-label', this.t('upcoming'));
+      setSel('.kpi-routine .prio-kpi-label', this.t('routineGreen'));
+      setSel('.kpi-missing .prio-kpi-label', this.t('needsVerification'));
+
+      setSel('.card-ai-chatbot .card-title', this.t('aiChatbot'));
+      setSel('.card-ai-chatbot .card-sub', this.t('aiChatbotSub'));
+      setSel('.card-maternal-health .grid-card-title', this.t('maternalHealth'));
+      setSel('.card-maternal-health .grid-card-sub', this.t('maternalHealthSub'));
+      setSel('.card-vaccine-tracker .grid-card-title', this.t('vaccineTracker'));
+      setSel('.card-vaccine-tracker .grid-card-sub', this.t('vaccineTrackerSub'));
+      setSel('.home-quick-stats-section .section-subheading', this.t('fieldRegisterSummary'));
+
+      // Sidebar nav
+      setSel('.desktop-nav [data-nav="home"] span', this.t('navHome'));
+      setSel('.desktop-nav [data-nav="visits"] span', this.t('navVisits'));
+      setSel('.desktop-nav [data-nav="followups"] span', this.t('navFollowups'));
+      setSel('.desktop-nav [data-nav="alerts"] span', this.t('navAlerts'));
+      setSel('.desktop-nav [data-nav="maternal-list"] span', this.t('navMaternal'));
+      setSel('.desktop-nav [data-nav="vaccine-list"] span', this.t('navVaccine'));
+      setSel('.desktop-nav [data-nav="nearby-facilities"] span', this.t('navNearby'));
+      setSel('.desktop-nav [data-nav="chat"] span', this.t('navChat'));
+      setSel('.desktop-nav [data-nav="profile"] span', this.t('navProfile'));
+      setSel('.btn-sidebar-logout span', this.t('logout'));
+
+      // Mobile bottom nav
+      setSel('.bottom-tab-btn[data-tab="home"] span', this.t('navHome'));
+      setSel('.bottom-tab-btn[data-tab="visits"] span', this.t('navVisits'));
+      setSel('.bottom-tab-btn[data-tab="followups"] span', this.t('navFollowups'));
+      setSel('.bottom-tab-btn[data-tab="alerts"] span', this.t('navAlerts'));
+      setSel('.bottom-tab-btn[data-tab="chat"] span', this.t('navChat'));
+
+      // Visits & Priority Queue
+      setSel('#screen-visits .header-title', this.t('visitsHeader'));
+      setSel('#visitsSubtabBar [data-subtab="priority"]', this.t('subtabPriority'));
+      setSel('#visitsSubtabBar [data-subtab="register"]', this.t('subtabRegister'));
+      setSel('#visitsPriorityPanel .section-subheading', this.t('prioritizedHouseholds'));
+
+      const pInput = document.getElementById('prioritySearchInput');
+      if (pInput) pInput.placeholder = this.t('searchPrioPlaceholder');
+      const vInput = document.getElementById('visitsSearchInput');
+      if (vInput) vInput.placeholder = this.t('searchVisitsPlaceholder');
+
+      setSel('#screen-followups .header-title', this.t('followupsHeader'));
+      setSel('#screen-alerts .header-title', this.t('alertsHeader'));
+
+      // Re-render priority cards so card labels reflect selected language
+      if (this.priorities && this.priorities.length > 0) {
+        this.renderPrioritiesList();
+      }
+    }
+
+    // ============================================================
+    // REUSABLE VOICE-FIRST ASSISTANT & SARVAM AI STT / TTS
+    // ============================================================
+    // ============================================================
+    // UNIVERSAL FORM CONTEXT DETECTION & POPULATION
+    // ============================================================
+    getActiveFormContext() {
+      const valOf = (id) => {
+        const el = document.getElementById(id);
+        return el ? (el.value || '') : '';
+      };
+
+      const activeDomScreen = document.querySelector('.screen-view.active')?.id?.replace('screen-', '') || '';
+      const activeScreen = activeDomScreen || this.currentScreen || 'home';
+
+      const planModal = document.getElementById('planVisitModal');
+      if (planModal && planModal.classList.contains('open')) {
+        return {
+          isFormContext: true,
+          form_id: 'planVisitForm',
+          form_name: 'Visit / Follow-up Planning Form',
+          module: 'planVisitModal',
+          beneficiary_id: valOf('planVisitBenId') || this.selectedHouseholdId || null,
+          fields: [
+            { id: 'planVisitBenId', label: 'Beneficiary ID', type: 'hidden', required: true, current_value: valOf('planVisitBenId') },
+            { id: 'planVisitType', label: 'Visit Purpose / Type', type: 'select', required: true, options: ['ANC', 'PNC', 'Vaccination', 'HIGH_RISK', 'GENERAL'], current_value: valOf('planVisitType') },
+            { id: 'planVisitDueDate', label: 'Follow-up Due Date', type: 'date', required: true, current_value: valOf('planVisitDueDate') },
+            { id: 'planVisitFlag', label: 'Priority / Escalation Flag', type: 'select', required: false, options: ['N', 'M', 'H', 'HS', 'S'], current_value: valOf('planVisitFlag') },
+            { id: 'planVisitNote', label: 'Workflow Note / Action', type: 'textarea', required: false, current_value: valOf('planVisitNote') }
+          ]
+        };
+      }
+
+      if (activeScreen === 'maternal-form') {
+        return {
+          isFormContext: true,
+          form_id: 'maternalProfileForm',
+          form_name: 'Pregnancy Registration Form',
+          module: 'maternal-form',
+          beneficiary_id: (this.editingTarget === 'mother' && this.selectedMother) ? this.selectedMother.id : null,
+          fields: [
+            { id: 'motherFormName', label: 'Full Name', type: 'text', required: true, current_value: valOf('motherFormName') },
+            { id: 'motherFormAge', label: 'Age', type: 'number', required: false, current_value: valOf('motherFormAge') },
+            { id: 'motherFormDOB', label: 'DOB', type: 'text', required: false, current_value: valOf('motherFormDOB') },
+            { id: 'motherFormPhone', label: 'Phone Number', type: 'tel', required: true, current_value: valOf('motherFormPhone') },
+            { id: 'motherFormAddress', label: 'Address', type: 'text', required: true, current_value: valOf('motherFormAddress') },
+            { id: 'motherFormDueDate', label: 'Due Date', type: 'text', required: true, current_value: valOf('motherFormDueDate') },
+            { id: 'motherFormWeight', label: 'Weight', type: 'text', required: false, current_value: valOf('motherFormWeight') },
+            { id: 'motherFormIron', label: 'Iron Tablets', type: 'text', required: false, current_value: valOf('motherFormIron') },
+            { id: 'motherFormBlood', label: 'Blood Group', type: 'text', required: false, current_value: valOf('motherFormBlood') }
+          ]
+        };
+      }
+
+      if (activeScreen === 'vaccine-form') {
+        return {
+          isFormContext: true,
+          form_id: 'babyProfileForm',
+          form_name: 'Child Registration Form',
+          module: 'vaccine-form',
+          beneficiary_id: (this.editingTarget === 'baby' && this.selectedBaby) ? this.selectedBaby.id : null,
+          fields: [
+            { id: 'babyFormName', label: 'Full Name', type: 'text', required: true, current_value: valOf('babyFormName') },
+            { id: 'babyFormGender', label: 'Gender', type: 'text', required: false, current_value: valOf('babyFormGender') },
+            { id: 'babyFormDOB', label: 'DOB', type: 'text', required: true, current_value: valOf('babyFormDOB') },
+            { id: 'babyFormPhone', label: 'Phone Number', type: 'tel', required: false, current_value: valOf('babyFormPhone') },
+            { id: 'babyFormAddress', label: 'Address', type: 'text', required: true, current_value: valOf('babyFormAddress') },
+            { id: 'babyFormGuardian', label: 'Parent/Guardian Name', type: 'text', required: false, current_value: valOf('babyFormGuardian') },
+            { id: 'babyFormBlood', label: 'Blood Group', type: 'text', required: false, current_value: valOf('babyFormBlood') }
+          ]
+        };
+      }
+
+      if (['visits', 'followups', 'household-detail'].includes(activeScreen)) {
+        const ctxMap = {
+          visits: ['visitsRegister', 'Field Visits Register'],
+          followups: ['followupsRegister', 'Follow-up Scheduling'],
+          'household-detail': ['householdDetail', 'Household Visit / Follow-up']
+        };
+        const [fid, fname] = ctxMap[activeScreen];
+        return {
+          isFormContext: true,
+          form_id: fid,
+          form_name: fname,
+          module: activeScreen,
+          beneficiary_id: this.selectedHouseholdId || null,
+          fields: [
+            { id: 'planVisitBenId', label: 'Beneficiary ID', type: 'hidden', required: true, current_value: this.selectedHouseholdId || '' },
+            { id: 'planVisitType', label: 'Visit Purpose / Type', type: 'select', required: true, options: ['ANC', 'PNC', 'Vaccination', 'HIGH_RISK', 'GENERAL'], current_value: '' },
+            { id: 'planVisitDueDate', label: 'Follow-up Due Date', type: 'date', required: true, current_value: '' },
+            { id: 'planVisitFlag', label: 'Priority / Escalation Flag', type: 'select', required: false, options: ['N', 'M', 'H', 'HS', 'S'], current_value: 'N' },
+            { id: 'planVisitNote', label: 'Workflow Note / Action', type: 'textarea', required: false, current_value: '' }
+          ]
+        };
+      }
+
+      const assistantLabels = {
+        home: 'Home Priority Assistant',
+        alerts: 'Alerts Assistant',
+        chat: 'AI Health Assistant',
+        'maternal-list': 'Maternal Health Assistant',
+        'maternal-detail': 'Maternal Profile Assistant',
+        'vaccine-list': 'Vaccine Tracker Assistant',
+        'vaccine-detail': 'Child Profile Assistant'
+      };
+      return {
+        isFormContext: false,
+        assistant_mode: true,
+        form_id: activeScreen,
+        form_name: assistantLabels[activeScreen] || 'SAKHI Assistant',
+        module: activeScreen,
+        beneficiary_id: this.selectedHouseholdId || this.selectedMother?.id || this.selectedBaby?.id || null,
+        fields: []
+      };
+    }
+
+    populateActiveForm(fieldsMap, formContext) {
+      if (!fieldsMap) return [];
+      const populated = [];
+      for (const [fieldId, value] of Object.entries(fieldsMap)) {
+        if (value === null || value === undefined || value === '') continue;
+        const el = document.getElementById(fieldId);
+        if (el) {
+          el.value = String(value);
+          populated.push(fieldId);
+        }
+      }
+      // If we are on visits/followups/household-detail and matched a beneficiary, also populate planVisitModal inputs
+      if (['visitsRegister', 'followupsRegister', 'householdDetail'].includes(formContext?.form_id)) {
+        for (const [fieldId, value] of Object.entries(fieldsMap)) {
+          if (value === null || value === undefined || value === '') continue;
+          const el = document.getElementById(fieldId);
+          if (el) el.value = String(value);
+        }
+      }
+      return populated;
+    }
+
+    openVoiceModal() {
+      const modal = document.getElementById('voiceAssistantModal');
+      if (!modal) return;
+      const langSel = document.getElementById('voiceLangSelect');
+      if (langSel && this.currentLang) {
+        const map = { en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
+        langSel.value = map[this.currentLang] || 'unknown';
+      }
+      const ctx = this.getActiveFormContext();
+      const badge = document.getElementById('voiceActiveFormBadge');
+      if (badge) {
+        badge.textContent = ctx.isFormContext ? `Active Form: ${ctx.form_name}` : `Assistant: ${ctx.form_name}`;
+      }
+      const btnProc = document.getElementById('btnVoiceProcess');
+      if (btnProc) btnProc.textContent = ctx.isFormContext ? 'Extract & Fill Form' : 'Ask Assistant';
+      modal.classList.add('open');
+    }
+
+    openVoiceModalWithPreview() {
+      this.openVoiceModal();
+      if (this._pendingChatAction) {
+        this.renderVoicePreview({
+          action_preview: this._pendingChatAction,
+          requires_confirmation: true
+        });
+      }
+    }
+
+    closeVoiceModal() {
+      this.stopSpeaking();
+      this._activeVisitVoiceId = null;
+      const titleEl = document.getElementById('voiceModalTitle');
+      if (titleEl) titleEl.textContent = 'SAKHI Voice Assistant';
+      const modal = document.getElementById('voiceAssistantModal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    setVoiceStatus(msg) {
+      const el = document.getElementById('voiceStatusBar');
+      if (el) el.textContent = msg;
+    }
+
+    async toggleVoiceRecording() {
+      const btn = document.getElementById('btnVoiceRecord');
+      const lbl = document.getElementById('btnVoiceRecordLabel');
+
+      if (this._mediaRecorder && this._mediaRecorder.state === 'recording') {
+        this._mediaRecorder.stop();
+        if (btn) btn.classList.remove('recording');
+        if (lbl) lbl.textContent = 'Start Recording';
+        this.setVoiceStatus('Processing audio with Sarvam AI...');
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        this.setVoiceStatus('Microphone access not supported in this browser. You can type or edit below.');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        this._audioChunks = [];
+        this._mediaRecorder = new MediaRecorder(stream);
+        this._mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) this._audioChunks.push(e.data);
+        };
+        this._mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach(t => t.stop());
+          const blob = new Blob(this._audioChunks, { type: 'audio/webm' });
+          await this.sendAudioToSarvam(blob);
+        };
+        this._mediaRecorder.start();
+        if (btn) btn.classList.add('recording');
+        if (lbl) lbl.textContent = 'Stop Recording';
+        this.setVoiceStatus('Recording... Speak naturally in Kannada, Hindi, or English.');
+      } catch (err) {
+        this.setVoiceStatus('Microphone permission denied or unavailable. You can type your request below.');
+      }
+    }
+
+    async sendAudioToSarvam(audioBlob) {
+      const lang = document.getElementById('voiceLangSelect')?.value || 'unknown';
+      const formData = new FormData();
+      formData.append('file', audioBlob, 'recording.webm');
+      formData.append('language_code', lang);
+      formData.append('mode', 'transcribe');
+
+      try {
+        const resp = await fetch('/api/voice/transcribe', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+        if (data.success && data.transcript) {
+          const input = document.getElementById('voiceTranscriptInput');
+          if (input) input.value = data.transcript;
+          this.setVoiceStatus(`Transcribed via Sarvam AI (${data.language_code || lang}). Review and click Analyze.`);
+          await this.processVoiceTranscript();
+        } else {
+          this.setVoiceStatus(data.error || data.message || 'Speech transcription unavailable. Type or edit transcript below.');
+        }
+      } catch (err) {
+        this.setVoiceStatus('Failed to reach transcription endpoint. Type or edit transcript below.');
+      }
+    }
+
+    async processVoiceTranscript() {
+      const transcript = document.getElementById('voiceTranscriptInput')?.value?.trim();
+      if (!transcript) {
+        this.setVoiceStatus('Please record or enter a transcript first.');
+        return;
+      }
+
+      // If opened from a specific Visit Card "Voice Note" button, prepare visit note update preview
+      if (this._activeVisitVoiceId) {
+        const visit = this.visits.find(v => v.id === this._activeVisitVoiceId);
+        this.setVoiceStatus('Analyzing clinical visit note...');
+        try {
+          const pnResp = await fetch('/api/voice/process-note', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: transcript, beneficiary_id: visit?.beneficiary_id || this.selectedHouseholdId })
+          });
+          const pnData = await pnResp.json();
+          const emergency = pnData.high_risk ? {
+            warning: `CLINICAL ALERT (${pnData.severity})`,
+            instruction: pnData.clinical_guidance
+          } : null;
+
+          this.renderVoicePreview({
+            emergency,
+            tts_text: pnData.clinical_guidance,
+            action_preview: {
+              requires_confirmation: true,
+              action_type: 'update_visit_note',
+              preview_title: `Save Voice Note to Visit ${this._activeVisitVoiceId}`,
+              fields: {
+                visit_id: this._activeVisitVoiceId,
+                beneficiary_id: visit?.beneficiary_id || '',
+                note: transcript,
+                voice: transcript,
+                status: 'Complete'
+              }
+            }
+          });
+          this.setVoiceStatus('Review visit note and click Confirm & Save.');
+        } catch (err) {
+          this.setVoiceStatus('Error analyzing visit note.');
+        }
+        return;
+      }
+
+      const formContext = this.getActiveFormContext();
+      const langHint = document.getElementById('voiceLangSelect')?.value || 'unknown';
+      if (formContext.isFormContext) {
+        this.setVoiceStatus(`Extracting fields for ${formContext.form_name}...`);
+        try {
+          const resp = await fetch('/api/voice/extract-form', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              transcript,
+              form_context: formContext,
+              language_code: langHint
+            })
+          });
+          if (!resp.ok) {
+            const errTxt = await resp.text();
+            this.setVoiceStatus(`API Error (${resp.status}): ${errTxt.slice(0, 120)}`);
+            return;
+          }
+          const data = await resp.json();
+          this.populateActiveForm(data.fields, formContext);
+          this.renderFormExtractionPreview(data, formContext);
+          this.setVoiceStatus(`Populated ${formContext.form_name}. Review, edit, or speak more to merge.`);
+        } catch (err) {
+          this.setVoiceStatus(`Form extraction failed: ${err?.message || 'Network error'}`);
+        }
+        return;
+      }
+
+      this.setVoiceStatus(`Asking ${formContext.form_name}...`);
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: transcript,
+            beneficiary_id: formContext.beneficiary_id || null,
+            current_draft: this.voiceDraft || null,
+            screen_context: this.captureVisibleScreenContext(),
+            shared_tab_context: this.getSharedTabContext(),
+            language_code: langHint === 'unknown' ? ({ en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' }[this.currentLang] || 'en-IN') : langHint,
+            conversation_history: (this.voiceChatHistory || []).slice(-6)
+          })
+        });
+        if (!resp.ok) {
+          const errTxt = await resp.text();
+          this.setVoiceStatus(`API Error (${resp.status}): ${errTxt.slice(0, 120)}`);
+          return;
+        }
+        const data = await resp.json();
+        this.voiceChatHistory.push({ role: 'user', content: transcript });
+        this.voiceChatHistory.push({ role: 'assistant', content: data.response || '' });
+
+        this.renderVoiceAssistantConversation(data);
+        this.setVoiceStatus('Response ready. Ask a follow-up or tap Play Response.');
+      } catch (err) {
+        this.setVoiceStatus(`Error reaching assistant: ${err?.message || 'Network error'}`);
+      }
+    }
+
+    renderVoiceAssistantConversation(latestData) {
+      const box = document.getElementById('voicePreviewContainer');
+      const ttsBtn = document.getElementById('btnVoicePlayTts');
+      if (!box) return;
+
+      const spokenText = latestData.tts_text || latestData.response || '';
+      this._lastVoiceTtsText = spokenText;
+      if (ttsBtn) ttsBtn.style.display = spokenText ? 'inline-flex' : 'none';
+
+      const turnsHtml = (this.voiceChatHistory || []).slice(-6).map(turn => {
+        const isUser = turn.role === 'user';
+        return `
+          <div style="padding:0.45rem 0.65rem;border-radius:10px;font-size:0.82rem;white-space:pre-line;${isUser ? 'background:#DCFCE7;color:#14532D;align-self:flex-end;' : 'background:#EFF6FF;color:#0F172A;'}">
+            <strong>${isUser ? 'You' : 'SAKHI'}:</strong> ${this.escapeHtml(turn.content)}
+          </div>
+        `;
+      }).join('');
+
+      const srcHtml = latestData.source
+        ? `<div style="font-size:0.7rem;color:#64748B;">Source: ${this.escapeHtml(latestData.source)}</div>`
+        : '';
+
+      if (latestData.action_preview && latestData.action_preview.requires_confirmation) {
+        this._pendingChatAction = latestData.action_preview;
+        this.renderVoicePreview(latestData);
+        return;
+      }
+
+      box.innerHTML = `
+        <div class="voice-preview-card" style="gap:0.45rem;">
+          ${turnsHtml}
+          ${srcHtml}
+        </div>
+      `;
+    }
+
+    renderVoicePreview(data) {
+      const box = document.getElementById('voicePreviewContainer');
+      const ttsBtn = document.getElementById('btnVoicePlayTts');
+      if (!box) return;
+
+      const emergencyHtml = data.emergency ? `
+        <div class="prio-escalation-box">
+          <div class="prio-esc-title">⚠️ ${this.escapeHtml(data.emergency.warning)}</div>
+          <div class="prio-esc-instr">${this.escapeHtml(data.emergency.instruction)}</div>
+        </div>
+      ` : '';
+
+      const spokenText = data.tts_text || data.response || data.message || '';
+      this._lastVoiceTtsText = spokenText;
+      if (ttsBtn) ttsBtn.style.display = spokenText ? 'inline-flex' : 'none';
+
+      if (data.response || data.message) {
+        const msg = data.response || data.message;
+        box.innerHTML = `
+          ${emergencyHtml}
+          <div class="voice-preview-card">
+            <div style="font-size:0.85rem;white-space:pre-line;color:#0F172A;">${this.escapeHtml(msg)}</div>
+          </div>
+        `;
+        if (!data.action_preview) return;
+      }
+
+      const preview = data.action_preview;
+      if (!preview) return;
+
+      if (preview.needs_clarification) {
+        box.innerHTML = `
+          ${emergencyHtml}
+          <div class="prio-missing-banner">${this.escapeHtml(preview.clarification)}</div>
+        `;
+        return;
+      }
+
+      this._activeVoicePreview = preview;
+      const fields = preview.fields || {};
+      const missingHtml = (preview.missing_fields && preview.missing_fields.length)
+        ? `<div class="prio-missing-banner">Missing fields: ${this.escapeHtml(preview.missing_fields.join(', '))}</div>` : '';
+      const dupHtml = (preview.potential_duplicates && preview.potential_duplicates.length)
+        ? `<div class="prio-missing-banner">⚠️ Potential duplicate: ${this.escapeHtml(preview.potential_duplicates.map(d => `${d.name} (${d.beneficiary_id})`).join(', '))}</div>` : '';
+
+      const fieldInputs = Object.entries(fields)
+        .filter(([k]) => !['entity_type', 'visit_id', 'followup_requested'].includes(k))
+        .map(([k, v]) => `
+          <div class="plan-field-group">
+            <label>${this.escapeHtml(k)}</label>
+            <input type="text" class="auth-input voice-field-edit" data-field="${this.escapeHtml(k)}" value="${this.escapeHtml(v == null ? '' : String(v))}">
+          </div>
+        `).join('');
+
+      box.innerHTML = `
+        ${emergencyHtml}
+        <div class="voice-preview-card">
+          <strong>${this.escapeHtml(preview.preview_title || 'Confirm Action')}</strong>
+          ${dupHtml}
+          ${missingHtml}
+          <div class="voice-preview-grid">${fieldInputs}</div>
+          <div class="plan-visit-actions">
+            <button type="button" class="btn-secondary-outline" onclick="sakhiApp.cancelVoicePreview()">Cancel</button>
+            <button type="button" class="btn-primary-blue" onclick="sakhiApp.confirmVoiceAction()">Confirm & Save</button>
+          </div>
+        </div>
+      `;
+    }
+
+    cancelVoicePreview() {
+      this.voiceDraft = null;
+      this._activeVoicePreview = null;
+      const box = document.getElementById('voicePreviewContainer');
+      if (box) box.innerHTML = '';
+      this.setVoiceStatus('Cancelled. Nothing was saved.');
+    }
+
+    async confirmVoiceAction() {
+      if (!this._activeVoicePreview) return;
+      const payload = { ...(this._activeVoicePreview.fields || {}) };
+      document.querySelectorAll('#voicePreviewContainer .voice-field-edit').forEach(inp => {
+        const key = inp.dataset.field;
+        if (key) payload[key] = inp.value.trim() || null;
+      });
+
+      this.setVoiceStatus('Saving confirmed record...');
+      try {
+        if (this._activeVoicePreview.action_type === 'update_visit_note') {
+          const vid = payload.visit_id || this._activeVisitVoiceId;
+          const resp = await fetch(`/api/visits/${encodeURIComponent(vid)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              status: payload.status || 'Complete',
+              note: payload.note,
+              voice: payload.voice || payload.note
+            })
+          });
+          const data = await resp.json();
+          if (resp.ok && data.success) {
+            this._activeVisitVoiceId = null;
+            this._activeVoicePreview = null;
+            this.showToast(`Voice note saved to visit ${vid}!`);
+            this.setVoiceStatus(`✓ Saved to visit ${vid}.`);
+            await this.fetchBackendData();
+            this.closeVoiceModal();
+          } else {
+            this.setVoiceStatus(data.detail || 'Could not update visit note.');
+          }
+          return;
+        }
+
+        const resp = await fetch('/api/voice/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action_type: this._activeVoicePreview.action_type,
+            payload,
+            confirmed: true
+          })
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          this.voiceDraft = null;
+          this._activeVoicePreview = null;
+          this.showToast(data.message || 'Saved successfully!');
+          this.setVoiceStatus(`✓ ${data.message}`);
+          await this.fetchBackendData();
+        } else {
+          this.setVoiceStatus(data.detail || data.error || 'Could not save record.');
+        }
+      } catch (err) {
+        this.setVoiceStatus('Failed to execute confirmed action.');
+      }
+    }
+
+    toggleSpeakLastResponse() {
+      if (this._lastVoiceTtsText) {
+        this.speakText(this._lastVoiceTtsText, 'btnVoicePlayTts');
+      }
+    }
+
+    stopSpeaking() {
+      if (this._currentAudio) {
+        this._currentAudio.pause();
+        this._currentAudio = null;
+      }
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      this._isSpeaking = false;
+    }
+
+    async speakText(text, btnId) {
+      const btn = btnId ? document.getElementById(btnId) : null;
+      if (this._isSpeaking) {
+        this.stopSpeaking();
+        if (btn) btn.textContent = '🔊 Play';
+        return;
+      }
+      if (!text) return;
+
+      this._isSpeaking = true;
+      if (btn) btn.textContent = '⏳ Loading...';
+      const langMap = { en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
+      const languageCode = langMap[this.currentLang] || 'en-IN';
+
+      try {
+        const resp = await fetch('/api/voice/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, language_code: languageCode })
+        });
+        const data = await resp.json();
+        if (data.success && data.audio_base64) {
+          const audio = new Audio(`data:${data.mime_type || 'audio/wav'};base64,${data.audio_base64}`);
+          this._currentAudio = audio;
+          if (btn) btn.textContent = '⏹ Stop';
+          audio.onended = () => {
+            this._isSpeaking = false;
+            if (btn) btn.textContent = '🔊 Play';
+          };
+          await audio.play();
+          return;
+        }
+      } catch (err) {
+        console.warn('Sarvam TTS unavailable, trying browser fallback:', err);
+      }
+
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = languageCode;
+        if (btn) btn.textContent = '⏹ Stop';
+        utter.onend = () => {
+          this._isSpeaking = false;
+          if (btn) btn.textContent = '🔊 Play';
+        };
+        window.speechSynthesis.speak(utter);
+      } else {
+        this._isSpeaking = false;
+        if (btn) btn.textContent = '🔊 Play';
+        this.showToast('Audio playback unavailable.');
+      }
+    }
+
+    renderFormExtractionPreview(data, formContext) {
+      const box = document.getElementById('voicePreviewContainer');
+      const ttsBtn = document.getElementById('btnVoicePlayTts');
+      if (!box) return;
+
+      this._lastVoiceExtraction = data;
+      this._lastVoiceFormContext = formContext;
+      this._lastVoiceTtsText = data.tts_summary || '';
+      if (ttsBtn) ttsBtn.style.display = this._lastVoiceTtsText ? 'inline-flex' : 'none';
+
+      const fields = data.fields || {};
+      const entriesHtml = Object.entries(fields).map(([k, v]) => {
+        const meta = (formContext.fields || []).find(f => f.id === k);
+        const label = meta ? meta.label : k;
+        return `<div><strong>${this.escapeHtml(label)}:</strong> ${this.escapeHtml(String(v))}</div>`;
+      }).join('') || '<div>No new fields extracted from this recording.</div>';
+
+      const missingHtml = (data.missing_fields && data.missing_fields.length)
+        ? `<div class="prio-missing-banner">Missing required: ${this.escapeHtml(data.missing_fields.join(', '))}</div>`
+        : `<div class="detail-verified-note">✓ Required form fields populated.</div>`;
+
+      const uncertainHtml = (data.uncertain_fields && data.uncertain_fields.length)
+        ? `<div class="prio-missing-banner">⚠️ Review uncertain: ${this.escapeHtml(data.uncertain_fields.join('; '))}</div>`
+        : '';
+
+      let candidateHtml = '';
+      if (data.candidate_beneficiaries && data.candidate_beneficiaries.length > 1) {
+        candidateHtml = `
+          <div class="prio-missing-banner">
+            ${this.escapeHtml(data.clarification || 'Select matching beneficiary:')}
+            <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-top:0.35rem;">
+              ${data.candidate_beneficiaries.map(b => `
+                <button type="button" class="btn-visit-action btn-voice-visit" onclick="sakhiApp.selectVoiceCandidate('${this.escapeHtml(b.beneficiary_id)}', '${this.escapeHtml(b.display_name).replace(/'/g, "\\'")}')">
+                  ${this.escapeHtml(b.display_name)} (${this.escapeHtml(b.beneficiary_id)})
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }
+
+      const translatedHtml = data.translated_transcript
+        ? `<div style="font-size:0.76rem;color:#475569;background:#F1F5F9;padding:0.35rem 0.5rem;border-radius:6px;"><strong>Translated (${this.escapeHtml(data.language_code || '')} → EN):</strong> ${this.escapeHtml(data.translated_transcript)}</div>`
+        : '';
+
+      box.innerHTML = `
+        <div class="voice-preview-card">
+          <strong>Populated: ${this.escapeHtml(formContext.form_name)}</strong>
+          ${translatedHtml}
+          <div style="font-size:0.82rem;color:#1E293B;display:flex;flex-direction:column;gap:0.2rem;">
+            ${entriesHtml}
+          </div>
+          ${candidateHtml}
+          ${missingHtml}
+          ${uncertainHtml}
+          <div class="plan-visit-actions">
+            <button type="button" class="btn-secondary-outline" onclick="sakhiApp.closeVoiceModal()">Edit Form Manually</button>
+            <button type="button" class="btn-primary-blue" onclick="sakhiApp.confirmAndSaveActiveForm()">Confirm & Save</button>
+          </div>
+        </div>
+      `;
+    }
+
+    selectVoiceCandidate(benId, name) {
+      const idEl = document.getElementById('planVisitBenId');
+      if (idEl) idEl.value = benId;
+      this.selectedHouseholdId = benId;
+      const titleEl = document.getElementById('planVisitModalTitle');
+      if (titleEl) titleEl.textContent = `Plan Visit · ${name} (${benId})`;
+      this.showToast(`Selected ${name} (${benId})`);
+    }
+
+    clearVoiceFormDraft() {
+      this.voiceDraft = null;
+      this._activeVoicePreview = null;
+      const input = document.getElementById('voiceTranscriptInput');
+      if (input) input.value = '';
+      const box = document.getElementById('voicePreviewContainer');
+      if (box) box.innerHTML = '';
+
+      const ctx = this.getActiveFormContext();
+      if (ctx.isFormContext) {
+        (ctx.fields || []).forEach(f => {
+          const el = document.getElementById(f.id);
+          if (el && f.type !== 'hidden') el.value = '';
+        });
+      }
+      this.setVoiceStatus('Voice draft cleared.');
+    }
+
+    async confirmAndSaveActiveForm() {
+      const ctx = this.getActiveFormContext();
+      if (ctx.form_id === 'maternalProfileForm') {
+        this.closeVoiceModal();
+        await this.handleSaveMother({ preventDefault: () => {} });
+        return;
+      }
+      if (ctx.form_id === 'babyProfileForm') {
+        this.closeVoiceModal();
+        await this.handleSaveBaby({ preventDefault: () => {} });
+        return;
+      }
+      if (ctx.form_id === 'planVisitForm') {
+        this.closeVoiceModal();
+        await this.submitPlanVisit({ preventDefault: () => {} });
+        return;
+      }
+      if (['visitsRegister', 'followupsRegister', 'householdDetail'].includes(ctx.form_id)) {
+        const benId = document.getElementById('planVisitBenId')?.value;
+        if (!benId) {
+          this.showToast('Please select a beneficiary first.');
+          return;
+        }
+        this.closeVoiceModal();
+        const modal = document.getElementById('planVisitModal');
+        if (modal) modal.classList.add('open');
+        this.showToast('Review populated visit form and click Save Visit to Register.');
+      }
+    }
+
+    // ============================================================
+    // EXPLICIT CONSENT-BASED BROWSER TAB SHARING (getDisplayMedia)
+    // ============================================================
+    captureVisibleScreenContext() {
+      const activeScreen = document.querySelector('.screen-view.active')?.id?.replace('screen-', '') || this.currentScreen || 'home';
+      const activeEl = document.getElementById(`screen-${activeScreen}`);
+      const visibleText = activeEl ? (activeEl.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400) : '';
+      return {
+        active_screen: activeScreen,
+        selected_beneficiary_id: this.selectedHouseholdId || null,
+        visible_text_summary: visibleText
+      };
+    }
+
+    getSharedTabContext() {
+      if (!this._tabShareStream) {
+        return { sharing_active: false };
+      }
+      const track = this._tabShareStream.getVideoTracks()[0];
+      const settings = track && track.getSettings ? track.getSettings() : {};
+      return {
+        sharing_active: true,
+        display_surface: settings.displaySurface || 'browser',
+        ...this.captureVisibleScreenContext()
+      };
+    }
+
+    async toggleTabSharing() {
+      const btn = document.getElementById('btnVoiceShareTab');
+      if (this._tabShareStream) {
+        this._tabShareStream.getTracks().forEach(t => t.stop());
+        this._tabShareStream = null;
+        if (btn) {
+          btn.textContent = '🖥️ Share Current Tab';
+          btn.style.background = '';
+          btn.style.color = '';
+        }
+        this.setVoiceStatus('Tab sharing stopped.');
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        this.setVoiceStatus('Browser tab sharing (getDisplayMedia) is not supported in this browser.');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { displaySurface: 'browser' },
+          audio: false
+        });
+        this._tabShareStream = stream;
+        const track = stream.getVideoTracks()[0];
+        if (track) {
+          track.onended = () => {
+            this._tabShareStream = null;
+            if (btn) {
+              btn.textContent = '🖥️ Share Current Tab';
+              btn.style.background = '';
+              btn.style.color = '';
+            }
+          };
+        }
+        if (btn) {
+          btn.textContent = '⏹ Stop Sharing (Active)';
+          btn.style.background = '#DCFCE7';
+          btn.style.color = '#166534';
+        }
+        this.setVoiceStatus('Tab sharing active. Ask a question about the displayed screen.');
+      } catch (err) {
+        this.setVoiceStatus('Tab sharing permission was cancelled or denied.');
+      }
     }
   }
 

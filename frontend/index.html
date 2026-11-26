@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=1.0.4">
+  <link rel="stylesheet" href="style.css?v=1.0.5">
 </head>
 <body class="theme-sakhi in-login-view">
 
@@ -32,7 +32,7 @@
           <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='50' fill='%23DCE7FE'/><circle cx='50' cy='36' r='20' fill='%23F4B58A'/><path d='M30 32 C30 18 70 18 70 32 C70 42 66 48 66 48 L34 48 Z' fill='%231F2937'/><path d='M22 92 C24 66 38 58 50 58 C62 58 76 66 78 92 Z' fill='%232B66FF'/><path d='M44 58 L56 58 L54 78 L46 78 Z' fill='%23FFFFFF'/></svg>" alt="ASHA Worker">
         </div>
         <div class="desktop-profile-info">
-          <span class="name">Arunima Raj</span>
+          <span class="name">Asha</span>
           <span class="role">ASHA Field Worker</span>
         </div>
       </div>
@@ -115,6 +115,13 @@
         </div>
 
         <div class="toolbar-right">
+          <!-- Language Switcher (EN / HI / KN) -->
+          <div class="lang-toggle-group" id="langToggleGroup" title="Switch Language (English / Hindi / Kannada)">
+            <button class="btn-lang-toggle active" data-lang="en" onclick="sakhiApp.setLanguage('en')">EN</button>
+            <button class="btn-lang-toggle" data-lang="hi" onclick="sakhiApp.setLanguage('hi')">हिन्दी</button>
+            <button class="btn-lang-toggle" data-lang="kn" onclick="sakhiApp.setLanguage('kn')">ಕನ್ನಡ</button>
+          </div>
+
           <!-- View Switcher Group -->
           <div class="view-mode-toggle-group">
             <span class="toggle-label-hint">View Mode:</span>
@@ -327,6 +334,12 @@
                 </svg>
               </button>
 
+              <div class="mobile-lang-pill">
+                <button class="btn-lang-mini active" data-lang="en" onclick="sakhiApp.setLanguage('en')">EN</button>
+                <button class="btn-lang-mini" data-lang="hi" onclick="sakhiApp.setLanguage('hi')">हिं</button>
+                <button class="btn-lang-mini" data-lang="kn" onclick="sakhiApp.setLanguage('kn')">ಕ</button>
+              </div>
+
               <button class="icon-btn-header" onclick="sakhiApp.showNotificationsModal()" aria-label="Notifications">
                 <div class="bell-badge-wrap">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round">
@@ -340,59 +353,57 @@
 
             <div class="home-greeting-wrap">
               <h1 class="home-greeting-title">Hello, ASHA Worker!</h1>
-              <p class="home-greeting-sub">How can i help you today?</p>
+              <p class="home-greeting-sub">SAKHI Priority Summary · Tap any card to open Visits Queue</p>
             </div>
           </header>
 
           <!-- White Card Area with Rounded Top -->
           <div class="home-content-sheet">
 
-            <!-- Field Register Metrics Dashboard (Screenshot media_1795284339491_d1cf273d) -->
+            <!-- A. Priority Summary Dashboard (Tapping opens Visits -> Priority Queue) -->
             <div class="metrics-dashboard-banner">
               <div class="metrics-dash-header">
                 <div class="dash-status-indicator">
                   <span class="live-dot-green"></span>
-                  <span class="dash-title">Dashboard</span>
+                  <span class="dash-title">Household Priority Summary</span>
                 </div>
                 <div class="dash-header-right">
-                  <span class="dash-date">Saturday, 21 Nov 2026</span>
+                  <span class="dash-date" id="priorityRefDate">Live SQLite</span>
                 </div>
               </div>
 
-              <div class="dash-cards-row">
-                <!-- Card 1: UPCOMING VISITS (Teal) -->
-                <div class="metric-dash-card card-upcoming" onclick="sakhiApp.navigateTo('visits'); sakhiApp.filterVisits('Upcoming')">
-                  <div class="dash-card-left-bar bar-teal"></div>
-                  <div class="dash-card-content">
-                    <span class="dash-card-label">UPCOMING VISITS</span>
-                    <div class="dash-card-number text-teal" id="statUpcomingVisits">2</div>
-                    <span class="dash-card-sub">Scheduled this week · Tap to view</span>
-                  </div>
-                  <div class="dash-card-icon icon-teal-box">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0D9488" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                      <line x1="16" y1="2" x2="16" y2="6"/>
-                      <line x1="8" y1="2" x2="8" y2="6"/>
-                      <line x1="3" y1="10" x2="21" y2="10"/>
-                    </svg>
-                  </div>
+              <div class="priority-summary-grid">
+                <div class="prio-kpi-card kpi-total" onclick="sakhiApp.openPriorityQueue('all')">
+                  <span class="prio-kpi-label">Total Households</span>
+                  <span class="prio-kpi-value" id="prioTotalHouseholds">0</span>
                 </div>
-
-                <!-- Card 2: OVERDUE VISITS (Red) -->
-                <div class="metric-dash-card card-overdue" onclick="sakhiApp.navigateTo('visits'); sakhiApp.filterVisits('Overdue')">
-                  <div class="dash-card-left-bar bar-crimson"></div>
-                  <div class="dash-card-content">
-                    <span class="dash-card-label">OVERDUE VISITS</span>
-                    <div class="dash-card-number text-crimson" id="statOverdueVisits">2</div>
-                    <span class="dash-card-sub">Require immediate visit · Tap to view</span>
-                  </div>
-                  <div class="dash-card-icon icon-crimson-box">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#E11D48" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <circle cx="12" cy="12" r="10"/>
-                      <line x1="12" y1="8" x2="12" y2="12"/>
-                      <line x1="12" y1="16" x2="12.01" y2="16"/>
-                    </svg>
-                  </div>
+                <div class="prio-kpi-card kpi-red" onclick="sakhiApp.openPriorityQueue('immediate_escalation')">
+                  <span class="prio-kpi-label">Immediate (RED)</span>
+                  <span class="prio-kpi-value" id="prioRedCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-orange" onclick="sakhiApp.openPriorityQueue('high_priority')">
+                  <span class="prio-kpi-label">High Priority</span>
+                  <span class="prio-kpi-value" id="prioOrangeCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-overdue" onclick="sakhiApp.openPriorityQueue('overdue')">
+                  <span class="prio-kpi-label">Overdue</span>
+                  <span class="prio-kpi-value" id="prioOverdueCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-due" onclick="sakhiApp.openPriorityQueue('due_today')">
+                  <span class="prio-kpi-label">Due Today</span>
+                  <span class="prio-kpi-value" id="prioDueTodayCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-upcoming" onclick="sakhiApp.openPriorityQueue('upcoming')">
+                  <span class="prio-kpi-label">Upcoming</span>
+                  <span class="prio-kpi-value" id="prioUpcomingCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-routine" onclick="sakhiApp.openPriorityQueue('routine')">
+                  <span class="prio-kpi-label">Routine (GREEN)</span>
+                  <span class="prio-kpi-value" id="prioRoutineCount">0</span>
+                </div>
+                <div class="prio-kpi-card kpi-missing" onclick="sakhiApp.openPriorityQueue('missing_data')">
+                  <span class="prio-kpi-label">Needs Verification</span>
+                  <span class="prio-kpi-value" id="prioMissingCount">0</span>
                 </div>
               </div>
             </div>
@@ -516,29 +527,75 @@
           </header>
 
           <div class="list-body-content">
-            <!-- Filter Pills Bar -->
-            <div class="filter-pills-bar">
-              <button class="filter-pill-btn active" data-filter="all" onclick="sakhiApp.filterVisits('all', this)">All (5)</button>
-              <button class="filter-pill-btn pill-crimson" data-filter="Overdue" onclick="sakhiApp.filterVisits('Overdue', this)">Overdue (2)</button>
-              <button class="filter-pill-btn pill-amber" data-filter="Due" onclick="sakhiApp.filterVisits('Due', this)">Due (1)</button>
-              <button class="filter-pill-btn pill-teal" data-filter="Upcoming" onclick="sakhiApp.filterVisits('Upcoming', this)">Upcoming (2)</button>
-              <button class="filter-pill-btn pill-emerald" data-filter="Complete" onclick="sakhiApp.filterVisits('Complete', this)">Complete</button>
+            <!-- Visits View Switcher: Priority Queue vs Field Visits Register -->
+            <div class="visits-subtab-bar" id="visitsSubtabBar">
+              <button class="visits-subtab-btn active" data-subtab="priority" onclick="sakhiApp.switchVisitsSubtab('priority')">
+                Priority Queue (Households)
+              </button>
+              <button class="visits-subtab-btn" data-subtab="register" onclick="sakhiApp.switchVisitsSubtab('register')">
+                Field Visits Register
+              </button>
             </div>
 
-            <!-- Search Bar -->
-            <div class="search-capsule-teal">
-              <input type="text" id="visitsSearchInput" class="search-capsule-input" placeholder="Search by name, village or purpose" oninput="sakhiApp.searchVisits(this.value)">
-              <span class="search-capsule-icon">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="11" cy="11" r="8"/>
-                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                </svg>
-              </span>
+            <!-- Panel A: Prioritized Household Queue -->
+            <div id="visitsPriorityPanel">
+              <div class="section-header-row">
+                <h3 class="section-subheading">Prioritized Households</h3>
+                <select id="prioritySortSelect" class="prio-sort-select" onchange="sakhiApp.setPrioritySort(this.value)" aria-label="Sort prioritized households">
+                  <option value="priority">Sort: Priority Level</option>
+                  <option value="due_date">Sort: Follow-up Date</option>
+                </select>
+              </div>
+
+              <div class="search-bar-wrap prio-search-wrap">
+                <span class="search-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                </span>
+                <input type="text" id="prioritySearchInput" class="search-input" placeholder="Search household ID, name, area, or reason..." oninput="sakhiApp.searchPriorities(this.value)">
+              </div>
+
+              <div class="filter-pills-bar prio-filter-bar" id="priorityFilterBar">
+                <button class="filter-pill-btn active" data-prio-filter="all" onclick="sakhiApp.filterPriorities('all', this)">All</button>
+                <button class="filter-pill-btn pill-crimson" data-prio-filter="immediate_escalation" onclick="sakhiApp.filterPriorities('immediate_escalation', this)">Immediate Escalation</button>
+                <button class="filter-pill-btn pill-amber" data-prio-filter="high_priority" onclick="sakhiApp.filterPriorities('high_priority', this)">High Priority</button>
+                <button class="filter-pill-btn pill-crimson" data-prio-filter="overdue" onclick="sakhiApp.filterPriorities('overdue', this)">Overdue</button>
+                <button class="filter-pill-btn pill-amber" data-prio-filter="due_today" onclick="sakhiApp.filterPriorities('due_today', this)">Due Today</button>
+                <button class="filter-pill-btn pill-teal" data-prio-filter="upcoming" onclick="sakhiApp.filterPriorities('upcoming', this)">Upcoming</button>
+                <button class="filter-pill-btn pill-emerald" data-prio-filter="routine" onclick="sakhiApp.filterPriorities('routine', this)">Routine</button>
+                <button class="filter-pill-btn" data-prio-filter="missing_data" onclick="sakhiApp.filterPriorities('missing_data', this)">Missing Data</button>
+              </div>
+
+              <div class="priority-cards-list" id="priorityListContainer">
+                <div class="empty-state-card"><p>Loading prioritized households...</p></div>
+              </div>
             </div>
 
-            <!-- Visits Cards Stream -->
-            <div class="visits-cards-stream" id="visitsListContainer">
-              <!-- Rendered via JS -->
+            <!-- Panel B: Field Visits Register -->
+            <div id="visitsRegisterPanel" style="display: none;">
+              <!-- Filter Pills Bar -->
+              <div class="filter-pills-bar">
+                <button class="filter-pill-btn active" data-filter="all" onclick="sakhiApp.filterVisits('all', this)">All (5)</button>
+                <button class="filter-pill-btn pill-crimson" data-filter="Overdue" onclick="sakhiApp.filterVisits('Overdue', this)">Overdue (2)</button>
+                <button class="filter-pill-btn pill-amber" data-filter="Due" onclick="sakhiApp.filterVisits('Due', this)">Due (1)</button>
+                <button class="filter-pill-btn pill-teal" data-filter="Upcoming" onclick="sakhiApp.filterVisits('Upcoming', this)">Upcoming (2)</button>
+                <button class="filter-pill-btn pill-emerald" data-filter="Complete" onclick="sakhiApp.filterVisits('Complete', this)">Complete</button>
+              </div>
+
+              <!-- Search Bar -->
+              <div class="search-capsule-teal">
+                <input type="text" id="visitsSearchInput" class="search-capsule-input" placeholder="Search by name, village or purpose" oninput="sakhiApp.searchVisits(this.value)">
+                <span class="search-capsule-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"/>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                </span>
+              </div>
+
+              <!-- Visits Cards Stream -->
+              <div class="visits-cards-stream" id="visitsListContainer">
+                <!-- Rendered via JS -->
+              </div>
             </div>
           </div>
         </div>
@@ -1553,10 +1610,10 @@
               <!-- Top Profile Card -->
               <div class="worker-card-white">
                 <div class="worker-avatar-circle">
-                  <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='50' fill='%23DCE7FE'/><circle cx='50' cy='36' r='20' fill='%23F4B58A'/><path d='M30 32 C30 18 70 18 70 32 C70 42 66 48 66 48 L34 48 Z' fill='%231F2937'/><path d='M22 92 C24 66 38 58 50 58 C62 58 76 66 78 92 Z' fill='%232B66FF'/><path d='M44 58 L56 58 L54 78 L46 78 Z' fill='%23FFFFFF'/></svg>" alt="Arunima Raj">
+                  <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='50' fill='%23DCE7FE'/><circle cx='50' cy='36' r='20' fill='%23F4B58A'/><path d='M30 32 C30 18 70 18 70 32 C70 42 66 48 66 48 L34 48 Z' fill='%231F2937'/><path d='M22 92 C24 66 38 58 50 58 C62 58 76 66 78 92 Z' fill='%232B66FF'/><path d='M44 58 L56 58 L54 78 L46 78 Z' fill='%23FFFFFF'/></svg>" alt="Asha">
                 </div>
                 <div class="worker-info-column">
-                  <h2 class="worker-name" id="workerProfileName">Arunima Raj</h2>
+                  <h2 class="worker-name" id="workerProfileName">Asha</h2>
                   <div class="worker-meta-row">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
                     <span id="workerProfilePhone">9876543210</span>
@@ -1714,6 +1771,26 @@
           <span class="tab-label">Profile</span>
         </button>
       </nav>
+
+      <!-- Household Detail Screen -->
+      <section class="screen-view" id="screen-household-detail">
+        <div class="list-screen-container">
+          <header class="app-header header-blue">
+            <button class="header-back-btn" onclick="sakhiApp.navigateBack()" aria-label="Back">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+            <h1 class="header-title" id="householdDetailHeaderTitle">Household Detail</h1>
+            <button class="header-more-btn" onclick="sakhiApp.openPlanVisitModalForCurrent()" aria-label="Plan Visit">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          </header>
+          <div class="list-body-content" id="householdDetailBody">
+            <div class="empty-state-card"><p>Select a household from the Priority Dashboard.</p></div>
+          </div>
+        </div>
+      </section>
 
     </main>
     </div><!-- /.desktop-content-area -->
@@ -1925,6 +2002,110 @@
   </div>
 
 
+  <!-- Plan Visit Modal (from Priority Dashboard / Household Detail) -->
+  <div class="modal-backdrop" id="planVisitModal" onclick="sakhiApp.closePlanVisitModal()">
+    <div class="options-sheet plan-visit-sheet" onclick="event.stopPropagation()">
+      <div class="options-sheet-handle"></div>
+      <h4 class="options-sheet-title" id="planVisitModalTitle">Plan Household Visit</h4>
+      <form id="planVisitForm" onsubmit="sakhiApp.submitPlanVisit(event)" class="plan-visit-form">
+        <input type="hidden" id="planVisitBenId">
+        <div class="plan-field-group">
+          <label for="planVisitType">Visit Purpose / Type</label>
+          <select id="planVisitType" class="auth-input">
+            <option value="ANC">ANC Follow-up</option>
+            <option value="PNC">Postnatal (PNC) Check</option>
+            <option value="Vaccination">Vaccination Follow-up</option>
+            <option value="HIGH_RISK">High-Risk Follow-up</option>
+            <option value="GENERAL">General Verification Visit</option>
+          </select>
+        </div>
+        <div class="plan-field-group">
+          <label for="planVisitDueDate">Follow-up Due Date</label>
+          <input type="date" id="planVisitDueDate" class="auth-input" required>
+        </div>
+        <div class="plan-field-group">
+          <label for="planVisitFlag">Priority / Escalation Flag</label>
+          <select id="planVisitFlag" class="auth-input">
+            <option value="N">Normal / Routine (N)</option>
+            <option value="M">Moderate Monitoring (M)</option>
+            <option value="H">High Priority (H)</option>
+            <option value="HS">Urgent Care Today (HS)</option>
+            <option value="S">Emergency Escalation (S)</option>
+          </select>
+        </div>
+        <div class="plan-field-group">
+          <label for="planVisitNote">Workflow Note / Action</label>
+          <textarea id="planVisitNote" class="auth-input" rows="2" placeholder="Reason for visit or verification note..."></textarea>
+        </div>
+        <div class="plan-visit-actions">
+          <button type="button" class="btn-secondary-outline" onclick="sakhiApp.closePlanVisitModal()">Cancel</button>
+          <button type="submit" class="btn-primary-blue" id="btnSubmitPlanVisit">Save Visit to Register</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Floating Context-Aware Voice Assistant Button -->
+  <button class="fab-voice-assistant" id="fabVoiceAssistant" onclick="sakhiApp.openVoiceModal()" title="Voice Assistant (Sarvam AI)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+      <line x1="12" y1="19" x2="12" y2="23"/>
+      <line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>
+    <span>Voice</span>
+  </button>
+
+  <!-- Reusable Voice-First Workflow Modal -->
+  <div class="modal-backdrop" id="voiceAssistantModal" onclick="sakhiApp.closeVoiceModal()">
+    <div class="options-sheet voice-modal-sheet" onclick="event.stopPropagation()">
+      <div class="options-sheet-handle"></div>
+      <div class="voice-modal-header">
+        <div>
+          <h4 class="options-sheet-title" id="voiceModalTitle">SAKHI Voice Assistant</h4>
+          <span class="prio-type-chip" id="voiceActiveFormBadge">Context: General</span>
+        </div>
+        <select id="voiceLangSelect" class="prio-sort-select" aria-label="Voice Language">
+          <option value="unknown">Auto (Multilingual)</option>
+          <option value="kn-IN">ಕನ್ನಡ (Kannada)</option>
+          <option value="hi-IN">हिन्दी (Hindi)</option>
+          <option value="en-IN">English (India)</option>
+        </select>
+      </div>
+
+      <div class="voice-controls-row">
+        <button type="button" class="btn-voice-record" id="btnVoiceRecord" onclick="sakhiApp.toggleVoiceRecording()">
+          <span class="voice-rec-dot"></span>
+          <span id="btnVoiceRecordLabel">Start Recording</span>
+        </button>
+        <button type="button" class="btn-secondary-outline" id="btnVoiceShareTab" onclick="sakhiApp.toggleTabSharing()" style="padding:0.55rem 0.75rem;font-size:0.78rem;">
+          🖥️ Share Current Tab
+        </button>
+        <button type="button" class="btn-secondary-outline btn-voice-tts" id="btnVoicePlayTts" onclick="sakhiApp.toggleSpeakLastResponse()" style="display:none;">
+          🔊 Play Response
+        </button>
+      </div>
+
+      <div class="voice-status-bar" id="voiceStatusBar">Tap Start Recording and speak naturally (or type/edit below).</div>
+
+      <div class="plan-field-group">
+        <label for="voiceTranscriptInput">Transcript Preview (Editable)</label>
+        <textarea id="voiceTranscriptInput" class="auth-input" rows="2" placeholder="Spoken transcript will appear here..."></textarea>
+      </div>
+
+      <div class="voice-parse-row" style="gap:0.5rem;">
+        <button type="button" class="btn-secondary-outline" id="btnVoiceClearDraft" onclick="sakhiApp.clearVoiceFormDraft()" style="padding:0.45rem 0.75rem;font-size:0.8rem;">
+          Clear Draft
+        </button>
+        <button type="button" class="btn-primary-blue" id="btnVoiceProcess" onclick="sakhiApp.processVoiceTranscript()">
+          Extract & Fill Form
+        </button>
+      </div>
+
+      <div id="voicePreviewContainer" class="voice-preview-container"></div>
+    </div>
+  </div>
+
   <!-- Options Menu Modal (3-Dots dropdown) -->
   <div class="modal-backdrop" id="optionsModal" onclick="sakhiApp.closeOptionsMenu()">
     <div class="options-sheet" onclick="event.stopPropagation()">
@@ -1939,6 +2120,6 @@
   <!-- Toast Notification Container -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <script src="app.js?v=1.0.4"></script>
+  <script src="app.js?v=1.0.5"></script>
 </body>
 </html>
